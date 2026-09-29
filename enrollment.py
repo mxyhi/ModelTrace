@@ -261,7 +261,7 @@ def _iter_completion(
     emitted = False
     for attempt in range(1, MAX_ATTEMPTS + 1):
         if cancel is not None and cancel.is_set():
-            raise CancelledError("定时测试已停止")
+            raise CancelledError("测试已停止")
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=240) as response:
@@ -270,7 +270,7 @@ def _iter_completion(
                         raise RuntimeError("上游未返回流式响应，可关闭流式输出后重试")
                     for text in completion_deltas(response, api_format):
                         if cancel is not None and cancel.is_set():
-                            raise CancelledError("定时测试已停止")
+                            raise CancelledError("测试已停止")
                         emitted = True
                         yield text
                     return
@@ -388,7 +388,7 @@ def iter_test_events(
     errors = []
     for attempt, challenge in enumerate(challenges, 1):
         if cancel is not None and cancel.is_set():
-            raise CancelledError("定时测试已停止")
+            raise CancelledError("测试已停止")
         yield {"type": "challenge", "attempt": attempt, "target": target_count, "max_attempts": max_attempts}
         try:
             parts = []
@@ -408,7 +408,7 @@ def iter_test_events(
                         yield {"type": "delta", "text": text}
             text = "".join(parts)
             if cancel is not None and cancel.is_set():
-                raise CancelledError("定时测试已停止")
+                raise CancelledError("测试已停止")
             minimum = max(80, math.ceil(challenge["expected_count"] * 0.55))
             parsed_count = len(parse_numbers(text))
             if parsed_count >= minimum:

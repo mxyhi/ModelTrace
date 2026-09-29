@@ -1,5 +1,3 @@
-import { readTestEvents } from "./test-controls.js";
-
 const byId = (id) => document.getElementById(id);
 const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -39,20 +37,26 @@ async function request(url, options = {}) {
 const jsonRequest = (method, values) => ({
   method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
 });
+const jobActive = (job) => job?.state === "running" || job?.state === "stopping";
+// 任务中模型状态变化（开始、结束）时需要刷新模型列表与测试记录。
+const jobModelsKey = (job) => job ? job.id + job.models.map((model) => model.status).join() : "";
 
 // API 监测：配置列表（卡片 / 表格）→ 配置详情（操作、进度、分页测试记录）。
 export function bindApiMonitor(renderResult) {
   const view = {
     configs: [], loaded: false, detailId: null, schedule: null, page: 0, total: 0,
     layout: localStorage.getItem(LAYOUT_KEY) === "table" ? "table" : "cards",
-    listHtml: "", rowsHtml: "", modelsHtml: "", editingId: null, runConfigId: null, runResult: false,
-    runBusy: false, configBusy: false, scheduleBusy: false, refreshFailed: false,
+    listHtml: "", rowsHtml: "", modelsHtml: "", editingId: null, job: null, resultJobId: null, refocus: false,
+    startBusy: false, configBusy: false, scheduleBusy: false, refreshFailed: false,
     draftModels: [], fetchedModels: [],
   };
   let scheduleVersion = 0;
   let modelsVersion = 0;
   let historyVersion = 0;
   let recordVersion = 0;
+  let jobVersion = 0;
+  let jobTimer = 0;
+  const renderedHtml = {};
   const configDialog = byId("monitor-config-dialog");
   const recordDialog = byId("monitor-record-dialog");
   const current = () => view.configs.find((config) => config.id === view.detailId);
@@ -180,15 +184,68 @@ export function bindApiMonitor(renderResult) {
     byId("monitor-stream").textContent = config.stream ? "流式" : "完整响应";
     byId("monitor-temperature").textContent = config.temperature ?? "接口默认";
     byId("monitor-interval").textContent = `${config.interval_minutes} 分钟`;
-    byId("monitor-run").disabled = view.runBusy;
-    byId("monitor-run").textContent = view.runBusy && view.runConfigId === config.id ? "正在测试…" : "立即测试";
-    byId("monitor-edit").disabled = view.configBusy || (view.runBusy && view.runConfigId === config.id);
+    const testing = jobActive(view.job);
+    byId("monitor-run").disabled = view.startBusy || testing;
+    byId("monitor-run").textContent = testing ? "正在测试…" : view.startBusy ? "正在启动…" : "立即测试";
+    byId("monitor-edit").disabled = view.configBusy || testing;
     byId("monitor-delete").disabled = byId("monitor-edit").disabled;
-    // 进度与结果只属于发起测试的配置，切到其他配置时隐藏。
-    byId("monitor-progress").hidden = view.runConfigId !== config.id;
-    byId("monitor-run-result").hidden = view.runConfigId !== config.id || !view.runResult;
+    renderJob();
     renderModelRows(config);
     renderSchedule();
+  }
+
+  function setHtml(id, html) {
+    // 轮询时内容不变就不重绘，避免打断用户选中、复制错误信息。
+    if (renderedHtml[id] === html) return;
+    byId(id).innerHTML = html;
+    renderedHtml[id] = html;
+  }
+
+  // 手动测试进度来自服务端任务快照：进行中展示当前模型的挑战进度，结束后多个模型展示汇总、单个模型展示归因结果。
+  function renderJob() {
+    const job = view.job;
+    byId("monitor-progress").hidden = !job;
+    if (!job) {
+      byId("monitor-run-result").hidden = true;
+      return;
+    }
+    const active = jobActive(job);
+    const total = job.models.length;
+    const model = job.models[job.current];
+    const summary = total > 1 && !active;
+    const succeeded = job.models.filter((item) => item.status === "success").length;
+    let status;
+    if (active) {
+      const prefix = total > 1 ? `模型 ${job.current + 1}/${total} · ${model.api_model}：` : "";
+      status = prefix + (job.state === "stopping" ? "正在停止，等待当前请求结束……"
+        : !job.attempt ? "正在生成挑战，准备调用模型"
+        : job.steps[job.attempt - 1] === "working" ? `正在进行第 ${job.attempt} 次尝试，等待模型完整输出……`
+        : `当前已有 ${job.accepted}/3 份有效回答`);
+    } else if (summary) {
+      status = `${job.state === "stopped" ? "已停止" : "全部完成"}：${succeeded}/${total} 个模型测试成功，各模型结果见下方「模型」列表`;
+    } else {
+      status = model.status === "success" ? `测试完成：${job.result.used_outputs}/3 份有效回答进入归因`
+        : job.state === "stopped" ? "测试已停止" : "测试未完成";
+    }
+    byId("monitor-progress-status").textContent = status;
+    byId("monitor-progress-count").textContent = summary ? `成功 ${succeeded}/${total}` : `有效 ${job.accepted}/3 · 已尝试 ${job.attempt}/6`;
+    byId("monitor-progress-fill").style.width = `${(summary ? succeeded / total : job.accepted / 3) * 100}%`;
+    setHtml("monitor-progress-steps", summary ? "" : job.steps.map((state, index) => `<span class="progress-step ${state}"><b>${index + 1}</b>挑战 ${index + 1} · ${stepLabels[state]}</span>`).join(""));
+    setHtml("monitor-test-errors", job.errors.map((text) => `<li>${escape(text)}</li>`).join(""));
+    const stop = byId("monitor-stop");
+    stop.hidden = !active;
+    stop.disabled = job.state === "stopping";
+    stop.textContent = job.state === "stopping" ? "正在停止…" : "停止测试";
+    byId("monitor-stream-output").hidden = !job.stream;
+    const text = job.text || (active ? "等待上游输出…" : "");
+    if (byId("monitor-stream-text").textContent !== text) byId("monitor-stream-text").textContent = text;
+    byId("monitor-stream-title").textContent = job.text ? `当前挑战输出 · ${job.text.length} 字符` : "当前挑战输出";
+    // 单个模型成功后只渲染一次归因结果。
+    if (!active && total === 1 && model.status === "success" && view.resultJobId !== job.id) {
+      view.resultJobId = job.id;
+      renderResult(job.result, byId("monitor-run-result"));
+    }
+    byId("monitor-run-result").hidden = view.resultJobId !== job.id;
   }
 
   function renderModelRows(config) {
@@ -196,7 +253,7 @@ export function bindApiMonitor(renderResult) {
       <td class="monitor-model-name">${escape(model.api_model)}</td>
       <td>${lastRunCell(model.last_run)}</td>
       <td>${successCell(model.last_success)}</td>
-      <td><button class="monitor-link" type="button" data-test-model="${escape(model.api_model)}"${view.runBusy ? " disabled" : ""}>单独测试<span class="visually-hidden"> ${escape(model.api_model)}</span></button></td>
+      <td><button class="monitor-link" type="button" data-test-model="${escape(model.api_model)}"${view.startBusy || jobActive(view.job) ? " disabled" : ""}>单独测试<span class="visually-hidden"> ${escape(model.api_model)}</span></button></td>
     </tr>`).join("");
     if (html === view.modelsHtml) return;
     const focused = document.activeElement?.dataset.testModel;
@@ -220,6 +277,7 @@ export function bindApiMonitor(renderResult) {
     view.page = 0;
     view.rowsHtml = "";
     view.modelsHtml = "";
+    view.job = null;
     byId("monitor-records-rows").replaceChildren();
     byId("monitor-records-table").hidden = true;
     byId("monitor-pager").hidden = true;
@@ -229,6 +287,7 @@ export function bindApiMonitor(renderResult) {
     renderDetail();
     byId("monitor-name").focus();
     loadHistory();
+    loadJob();
   }
 
   async function loadConfigs() {
@@ -466,109 +525,65 @@ export function bindApiMonitor(renderResult) {
     }
   }
 
-  // 手动测试：多个模型逐个发起，每个模型一条测试记录；单个模型失败不影响后续模型。
+  // 手动测试在服务端后台运行，刷新或关闭页面不影响；进行中时每秒读取进度，地址中的配置 ID 可在配置列表加载前使用。
+  async function loadJob() {
+    window.clearTimeout(jobTimer);
+    const version = ++jobVersion;
+    const configId = view.detailId;
+    if (!configId) return;
+    let job;
+    try {
+      ({ job } = await request(`/api/test/manual/${encodeURIComponent(configId)}`));
+    } catch {
+      // 读取失败时稍后重试；常规刷新失败由 refresh 提示。
+      if (version === jobVersion && jobActive(view.job)) jobTimer = window.setTimeout(loadJob, 3000);
+      return;
+    }
+    if (version !== jobVersion) return;
+    // 只展示进行中的任务，或本页一直在跟踪、刚结束的任务；此前已结束的结果见模型列表和测试记录。
+    const tracked = Boolean(job) && view.job?.id === job.id;
+    const next = job && (jobActive(job) || tracked) ? job : null;
+    const finished = tracked && jobActive(view.job) && !jobActive(job);
+    const changed = jobModelsKey(next) !== jobModelsKey(view.job);
+    view.job = next;
+    renderDetail();
+    // 测试期间按钮被禁用会丢失焦点，键盘用户完成后回到原按钮。
+    if (finished && view.refocus && document.activeElement === document.body) byId("monitor-run").focus();
+    if (changed) refresh();
+    if (jobActive(next)) jobTimer = window.setTimeout(loadJob, 1000);
+  }
+
+  // 手动测试：服务端按顺序测试所选模型，每个模型一条测试记录；单个模型失败不影响后续模型。
   async function runTest(models) {
     const config = current();
-    if (!config || view.runBusy) return;
-    const queue = models || config.api_models;
-    const multiple = queue.length > 1;
-    view.runBusy = true;
-    view.runConfigId = config.id;
-    view.runResult = false;
-    const refocus = document.activeElement === byId("monitor-run");
-    let states = [];
-    let accepted = 0;
-    let attempt = 0;
-    let prefix = "";
-    let currentModel = "";
-    let modelErrors = 0;
-    let succeeded = 0;
-    let lastResult = null;
-    const renderProgress = (status) => {
-      if (status) byId("monitor-progress-status").textContent = prefix + status;
-      byId("monitor-progress-count").textContent = `有效 ${accepted}/3 · 已尝试 ${attempt}/6`;
-      byId("monitor-progress-fill").style.width = `${accepted / 3 * 100}%`;
-      byId("monitor-progress-steps").innerHTML = states.map((state, index) => `<span class="progress-step ${state}"><b>${index + 1}</b>挑战 ${index + 1} · ${stepLabels[state]}</span>`).join("");
-    };
-    const addError = (text) => {
-      const item = document.createElement("li");
-      item.textContent = multiple ? `${currentModel} · ${text}` : text;
-      modelErrors++;
-      byId("monitor-test-errors").append(item);
-    };
+    if (!config || view.startBusy || jobActive(view.job)) return;
+    view.startBusy = true;
+    view.refocus = document.activeElement === byId("monitor-run");
     message();
-    byId("monitor-run-result").hidden = true;
-    byId("monitor-test-errors").replaceChildren();
-    byId("monitor-stream-output").hidden = !config.stream;
     renderDetail();
     try {
-      for (const [index, model] of queue.entries()) {
-        states = Array(6).fill("pending");
-        accepted = 0;
-        attempt = 0;
-        let body = "";
-        currentModel = model;
-        modelErrors = 0;
-        prefix = multiple ? `模型 ${index + 1}/${queue.length} · ${model}：` : "";
-        byId("monitor-stream-title").textContent = "当前挑战输出";
-        byId("monitor-stream-text").textContent = "等待上游输出…";
-        renderProgress("正在生成挑战，准备调用模型");
-        try {
-          const response = await fetch("/api/test/runs", jsonRequest("POST", { config_id: config.id, api_model: model }));
-          const final = await readTestEvents(response, (event) => {
-            if (event.type === "start") {
-              // 记录已创建，刷新后模型列表和测试记录立即显示「进行中」。
-              refresh();
-            } else if (event.type === "challenge") {
-              attempt = event.attempt;
-              states[attempt - 1] = "working";
-              body = "";
-              byId("monitor-stream-text").textContent = "等待上游输出…";
-              renderProgress(`正在进行第 ${attempt} 次尝试，等待模型完整输出……`);
-            } else if (event.type === "delta") {
-              body += event.text;
-              byId("monitor-stream-text").textContent = body;
-              byId("monitor-stream-title").textContent = `当前挑战输出 · ${body.length} 字符`;
-            } else if (event.type === "challenge_result") {
-              states[event.attempt - 1] = event.accepted ? "done" : "invalid";
-              if (event.accepted) accepted++;
-              else addError(`挑战 ${event.attempt}：有效数字不足 ${event.parsed_numbers}/${event.minimum_numbers}`);
-              renderProgress(`当前已有 ${accepted}/3 份有效回答`);
-            } else if (event.type === "challenge_error") {
-              states[event.attempt - 1] = "error";
-              addError(`挑战 ${event.attempt}：${event.error}`);
-              renderProgress(`当前已有 ${accepted}/3 份有效回答`);
-            }
-          });
-          states.forEach((state, stateIndex) => { if (state === "pending") states[stateIndex] = "skipped"; });
-          renderProgress(`测试完成：${final.result.used_outputs}/3 份有效回答进入归因`);
-          succeeded++;
-          lastResult = final.result;
-        } catch (error) {
-          renderProgress("测试未完成");
-          // 汇总错误会重复各挑战的原因；已逐条列出时只标记该模型失败。
-          if (multiple) addError(modelErrors ? "测试失败，未取得足够的有效回答" : error.message);
-          else if (view.detailId === config.id) message(error.message);
-        }
-        if (index < queue.length - 1) await refresh();
-      }
-      if (multiple) {
-        prefix = "";
-        byId("monitor-progress-status").textContent = `全部完成：${succeeded}/${queue.length} 个模型测试成功，各模型结果见下方「模型」列表`;
-        byId("monitor-progress-count").textContent = `成功 ${succeeded}/${queue.length}`;
-        byId("monitor-progress-fill").style.width = `${succeeded / queue.length * 100}%`;
-        byId("monitor-progress-steps").replaceChildren();
-      } else if (lastResult) {
-        view.runResult = true;
-        if (view.detailId === config.id) renderResult(lastResult, byId("monitor-run-result"));
-      }
+      const { job } = await request(`/api/test/manual/${encodeURIComponent(config.id)}`, jsonRequest("POST", { api_models: models || config.api_models }));
+      if (view.detailId === config.id) view.job = job;
+    } catch (error) {
+      if (view.detailId === config.id) message(error.message);
     } finally {
-      view.runBusy = false;
+      view.startBusy = false;
       renderDetail();
-      // 测试期间按钮被禁用会丢失焦点，键盘用户完成后回到原按钮。
-      if (refocus && document.activeElement === document.body && view.detailId === config.id) byId("monitor-run").focus();
-      await refresh();
     }
+    await loadJob();
+  }
+
+  async function stopTest() {
+    const config = current();
+    if (!config || !jobActive(view.job)) return;
+    try {
+      const { job } = await request(`/api/test/manual/${encodeURIComponent(config.id)}`, { method: "DELETE" });
+      if (job && view.job?.id === job.id) view.job = job;
+      renderDetail();
+    } catch (error) {
+      message(error.message);
+    }
+    await loadJob();
   }
 
   async function showRecord(runId) {
@@ -649,6 +664,7 @@ export function bindApiMonitor(renderResult) {
   byId("monitor-edit").addEventListener("click", () => editConfig(current()));
   byId("monitor-delete").addEventListener("click", deleteConfig);
   byId("monitor-run").addEventListener("click", () => runTest());
+  byId("monitor-stop").addEventListener("click", stopTest);
   byId("monitor-models-rows").addEventListener("click", (event) => {
     const button = event.target.closest("[data-test-model]");
     if (button) runTest([button.dataset.testModel]);
@@ -702,9 +718,13 @@ export function bindApiMonitor(renderResult) {
       if (close && !(dialog === configDialog && view.configBusy)) dialog.close();
     });
   }
-  // 定时任务由服务端运行，页面只在可见时轮询状态、卡片与当前页记录。
+  // 定时与手动测试都由服务端运行，页面只在可见时轮询状态、卡片与当前页记录。
   async function poll() {
-    if (!document.hidden && byId("workspace-api").classList.contains("active")) await refresh();
+    if (!document.hidden && byId("workspace-api").classList.contains("active")) {
+      await refresh();
+      // 发现其他页面发起的手动测试；进行中时由 loadJob 自行每秒轮询。
+      if (!jobActive(view.job)) loadJob();
+    }
     window.setTimeout(poll, 5000);
   }
   setLayout(view.layout);

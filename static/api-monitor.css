@@ -99,6 +99,7 @@
 .monitor-models td small { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
 .monitor-link { padding: 4px 2px; color: var(--primary); border: 0; background: none; font-size: 12px; font-weight: 650; }
 .monitor-link:hover { text-decoration: underline; }
+.progress-side { display: flex; flex: 0 0 auto; align-items: center; gap: 12px; }
 .monitor-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 9px 9px; font-size: 12px; font-variant-numeric: tabular-nums; }
 .monitor-pager > div { display: flex; gap: 8px; }
 .monitor-pager .button { min-height: 30px; padding: 5px 11px; }

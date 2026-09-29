@@ -83,14 +83,15 @@ def recorded_test(
                 event = redact(raw_event, configuration["api_key"])
                 if event["type"] == "result":
                     event["result"]["bank"] = summary
-                    # 先保存再发完成事件；页面在此后关闭也不会丢失已完成结果。
+                    # 先保存再发完成事件，消费方随后退出也不会丢失已完成结果。
                     store.finish_run(run_id, "success", time.monotonic() - started, result=event["result"])
                     finished = True
                     event["run_id"] = run_id
                     logger.info("test_run_completed run_id=%s source=%s", run_id, source)
                 yield event
     except CancelledError:
-        store.finish_run(run_id, "cancelled", time.monotonic() - started, error="定时测试已停止")
+        stopped = "定时测试已停止" if source == "scheduled" else "手动测试已停止"
+        store.finish_run(run_id, "cancelled", time.monotonic() - started, error=stopped)
         finished = True
         raise
     except Exception as error:
@@ -101,7 +102,8 @@ def recorded_test(
         yield {"type": "error", "run_id": run_id, "error": message}
     finally:
         if not finished:
-            store.finish_run(run_id, "cancelled", time.monotonic() - started, error="页面连接已断开，测试已停止")
+            # 调用方提前关闭生成器（未取得结果也未报错）时，不能让记录停在进行中。
+            store.finish_run(run_id, "cancelled", time.monotonic() - started, error="测试被中断，未完成")
 
 
 def collect_recorded_test(*args, **kwargs) -> dict:

@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from flask import Flask, Response, jsonify, render_template, request
 
 from enrollment import bank_summary, enroll_automatic, iter_completion, request_completion
+from manual_tests import ManualTests
 from test_scheduler import TestScheduler
 from testing_service import collect_recorded_test, list_models, recorded_test
 from testing_store import TestingStore
@@ -171,8 +172,12 @@ def run_scheduled_test(configuration: dict, cancel: Event) -> None:
 
 
 test_schedule = TestScheduler(run_scheduled_test)
-# 开启定时与删除配置互斥，避免定时任务落在刚删除的配置上。
-schedule_config_lock = Lock()
+manual_tests = ManualTests(
+    lambda configuration, cancel: recorded_test(
+        testing_store, configuration, "manual", unified_bank, summarized_unified_bank(), cancel)
+)
+# 开启定时、发起手动测试与删除配置互斥，避免后台任务落在刚删除的配置上。
+config_task_lock = Lock()
 
 
 def load_test_config(payload: dict) -> dict:
@@ -231,11 +236,14 @@ def test_configs():
 def test_config_detail(config_id: str):
     try:
         if request.method == "DELETE":
-            with schedule_config_lock:
+            with config_task_lock:
                 status = test_schedule.status()
                 if status["state"] != "stopped" and status["config_id"] == config_id:
                     return jsonify({"error": "请先停止使用此配置的定时任务"}), 409
+                if manual_tests.active(config_id):
+                    return jsonify({"error": "请先停止此配置正在进行的手动测试"}), 409
                 deleted_runs = testing_store.delete_config(config_id)
+                manual_tests.forget(config_id)
             app.logger.info("test_config_deleted config_id=%s deleted_runs=%s", config_id, deleted_runs)
             return jsonify({"deleted": True, "deleted_runs": deleted_runs})
         values = saved_config_values(request.get_json(), config_id)
@@ -273,26 +281,30 @@ def list_config_models():
         return jsonify({"error": str(error).replace(api_key.strip(), "[已隐藏]")}), 502
 
 
-@app.post("/api/test/runs")
-def start_test_run():
-    """手动测试配置中的一个模型；多个模型由页面逐个发起，每个模型一条测试记录。"""
+@app.route("/api/test/manual/<config_id>", methods=["GET", "POST", "DELETE"])
+def manual_test(config_id: str):
+    """手动测试在服务端后台执行：POST 发起（默认测全部模型），GET 读取进度，DELETE 停止。"""
+    if request.method == "GET":
+        return jsonify({"job": manual_tests.status(config_id)})
+    if request.method == "DELETE":
+        return jsonify({"job": manual_tests.stop(config_id)})
     try:
-        payload = request.get_json()
-        configuration = load_test_config(payload)
-        if payload.get("api_model") not in configuration["api_models"]:
-            raise ValueError("请选择配置中的模型")
-        configuration["api_model"] = payload["api_model"]
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            raise ValueError("请求内容必须是 JSON 对象")
+        with config_task_lock:
+            configuration = testing_store.config(config_id, include_key=True)
+            models = payload.get("api_models", configuration["api_models"])
+            if not isinstance(models, list) or not models or not all(model in configuration["api_models"] for model in models):
+                raise ValueError("请选择配置中的模型")
+            job = manual_tests.start(configuration, list(dict.fromkeys(models)))
+        return jsonify({"job": job}), 201
     except LookupError as error:
         return jsonify({"error": str(error)}), 404
     except (ValueError, TypeError) as error:
         return jsonify({"error": str(error)}), 400
-    bank, summary = unified_bank, summarized_unified_bank()
-
-    def generate():
-        with closing(recorded_test(testing_store, configuration, "manual", bank, summary)) as events:
-            for event in events:
-                yield json.dumps(event, ensure_ascii=False) + "\n"
-    return Response(generate(), mimetype="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 409
 
 
 @app.get("/api/test/history")
@@ -444,7 +456,7 @@ def scheduled_test():
         interval = float(payload.get("interval_minutes", configuration.get("interval_minutes", 60)))
         if not math.isfinite(interval) or not 1 <= interval <= 1440:
             raise ValueError("测试间隔必须在 1 到 1440 分钟之间")
-        with schedule_config_lock:
+        with config_task_lock:
             testing_store.config(configuration["id"])  # 加锁后复查，配置已删除则返回 404
             return jsonify(test_schedule.start(configuration, interval * 60)), 201
     except (TypeError, ValueError) as error:
