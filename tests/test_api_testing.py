@@ -210,11 +210,14 @@ class SchedulerTests(unittest.TestCase):
         self.scheduler = TestScheduler(run)
         with patch.object(web, "test_schedule", self.scheduler):
             first = web.app.test_client()
-            for extra in ({"interval_minutes": 0}, {"interval_minutes": "nan"}, {"stream": "false"}, {"base_url": "file:///tmp"}, {"api_key": ""}):
-                self.assertEqual(first.post("/api/test/schedule", json={**CONFIG, **extra}).status_code, 400)
-            self.assertEqual(first.post("/api/test/schedule", json={**CONFIG, "interval_minutes": 60}).status_code, 201)
+            saved = first.post("/api/test/configs", json={**CONFIG, "name": "定时", "api_models": [CONFIG["api_model"]]}).json["config"]
+            # 定时只接受已保存的配置。
+            for payload in ({"config_id": saved["id"], "interval_minutes": 0}, {"config_id": saved["id"], "interval_minutes": "nan"}, CONFIG):
+                self.assertEqual(first.post("/api/test/schedule", json=payload).status_code, 400)
+            self.assertEqual(first.post("/api/test/schedule", json={"config_id": "missing"}).status_code, 404)
+            self.assertEqual(first.post("/api/test/schedule", json={"config_id": saved["id"], "interval_minutes": 60}).status_code, 201)
             self.assertTrue(called.wait(1))
-            self.assertEqual(first.post("/api/test/schedule", json=CONFIG).status_code, 409)
+            self.assertEqual(first.post("/api/test/schedule", json={"config_id": saved["id"]}).status_code, 409)
             # 新页面/新客户端能读取并停止同一后台任务，不依赖启动页面。
             second = web.app.test_client()
             status = second.get("/api/test/schedule").json

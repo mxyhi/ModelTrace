@@ -12,10 +12,22 @@ const scheduleStatus = { running: "正在测试", waiting: "等待下一轮", st
 const stepLabels = { pending: "等待", working: "请求中", done: "有效", invalid: "数字不足", error: "接口失败", skipped: "无需调用" };
 const PAGE_SIZE = 10;
 const LAYOUT_KEY = "modeltrace.monitor-layout";
+const MAX_MODELS = 20;
+const CARD_MODELS = 4;
+const MODEL_HINT = `逗号、空格或换行分隔，可一次粘贴多个；最多 ${MAX_MODELS} 个，测试时逐个进行`;
+const splitModels = (text) => text.split(/[\s,，]+/).filter(Boolean);
 const resultText = (run) => `${escape(run.prediction)} · ${percent(run.probability)}`;
 const statusPill = (run) => `<span class="monitor-pill" data-tone="${escape(run?.status || "idle")}">${run ? runStatus[run.status] || escape(run.status) : "未测试"}</span>`;
 const lastOutcome = (run) => run.status === "success" ? resultText(run)
   : escape(run.error || (run.status === "running" ? "等待完成" : runStatus[run.status] || run.status));
+// 表格中「最近测试」「最近成功结果」两列，列表表格与详情页模型概览共用。失败原因可能很长，截断并用 title 展示全文。
+function lastRunCell(last) {
+  const note = last && last.status !== "success" ? ` · ${lastOutcome(last)}` : "";
+  return `${statusPill(last)}${last ? `<small title="${escape(dateTime(last.started_at))}${note}">${escape(dateTime(last.started_at))}${note}</small>` : ""}`;
+}
+const successCell = (success) => success ? `<strong>${resultText(success)}</strong><small>${escape(dateTime(success.started_at))}</small>`
+  : '<span class="monitor-muted">暂无成功记录</span>';
+const TABLE_HEAD = "<thead><tr><th>配置</th><th>接口模型</th><th>定时</th><th>最近测试</th><th>最近成功结果</th><th>记录</th></tr></thead>";
 
 async function request(url, options = {}) {
   const response = await fetch(url, { cache: "no-store", ...options });
@@ -33,10 +45,12 @@ export function bindApiMonitor(renderResult) {
   const view = {
     configs: [], loaded: false, detailId: null, schedule: null, page: 0, total: 0,
     layout: localStorage.getItem(LAYOUT_KEY) === "table" ? "table" : "cards",
-    listHtml: "", rowsHtml: "", editingId: null, runConfigId: null, runResult: false,
+    listHtml: "", rowsHtml: "", modelsHtml: "", editingId: null, runConfigId: null, runResult: false,
     runBusy: false, configBusy: false, scheduleBusy: false, refreshFailed: false,
+    draftModels: [], fetchedModels: [],
   };
   let scheduleVersion = 0;
+  let modelsVersion = 0;
   let historyVersion = 0;
   let recordVersion = 0;
   const configDialog = byId("monitor-config-dialog");
@@ -54,41 +68,48 @@ export function bindApiMonitor(renderResult) {
     }
   }
 
-  const listContainer = () => byId(view.layout === "table" ? "monitor-table-rows" : "monitor-grid");
+  const listContainer = () => byId(view.layout === "table" ? "monitor-table-content" : "monitor-grid");
   const schedulePill = (config) => {
     const schedule = activeSchedule(config);
     return schedule ? `<span class="monitor-pill" data-tone="${schedule.state === "stopping" ? "cancelled" : "running"}">${scheduleStatus[schedule.state]}</span>` : "";
   };
 
+  // 卡片按模型列出最近状态：有成功记录时展示最近成功结果，否则展示最近一次的原因。
+  function cardModelHtml(model) {
+    const last = model.last_run;
+    const success = model.last_success;
+    const detail = success ? `最近成功 ${resultText(success)}` : last ? lastOutcome(last) : "尚未测试";
+    return `<span class="monitor-card-model">
+      <span class="monitor-card-line"><span class="monitor-card-model-name">${escape(model.api_model)}</span>${statusPill(last)}</span>
+      <span class="monitor-card-detail" data-tone="${success ? "success" : ""}" title="${detail}">${detail}</span>
+    </span>`;
+  }
+
   function cardHtml(config) {
-    const last = config.last_run;
-    const success = config.last_success;
+    const more = config.models.length - CARD_MODELS;
     return `<button type="button" class="monitor-card" data-config-id="${escape(config.id)}">
       <span class="monitor-card-head"><strong>${escape(config.name)}</strong>${schedulePill(config)}</span>
-      <span class="monitor-card-model">${escape(config.api_model)}</span>
       <span class="monitor-card-url">${escape(config.base_url)}</span>
-      <span class="monitor-card-foot">
-        <span class="monitor-card-line"><span>${last ? `最近 ${escape(dateTime(last.started_at))}` : "最近结果"}</span><span>${config.run_count} 条记录</span></span>
-        <span class="monitor-card-line">${statusPill(last)}<span class="monitor-card-outcome">${last ? lastOutcome(last) : "尚未测试"}</span></span>
-        <span class="monitor-card-line"><span>最近成功</span><span>${success ? escape(dateTime(success.started_at)) : "暂无成功记录"}</span></span>
-        ${success ? `<span class="monitor-card-success" title="${resultText(success)}">${resultText(success)}</span>` : ""}
-      </span>
+      <span class="monitor-card-models">${config.models.slice(0, CARD_MODELS).map(cardModelHtml).join("")}${more > 0 ? `<span class="monitor-card-more">另有 ${more} 个模型</span>` : ""}</span>
+      <span class="monitor-card-foot"><span class="monitor-card-line">
+        <span>${config.last_run ? `最近 ${escape(dateTime(config.last_run.started_at))}` : "尚未测试"}</span>
+        <span>${config.api_models.length} 个模型 · ${config.run_count} 条记录</span>
+      </span></span>
     </button>`;
   }
 
-  // 整行可点击进入详情；名称按钮承担键盘焦点。失败原因可能很长，表格内截断并用 title 展示全文。
-  function rowHtml(config) {
-    const last = config.last_run;
-    const success = config.last_success;
-    const lastNote = last && last.status !== "success" ? ` · ${lastOutcome(last)}` : "";
-    return `<tr data-config-id="${escape(config.id)}">
-      <td><button class="monitor-link" type="button" data-config-id="${escape(config.id)}">${escape(config.name)}</button><small>${escape(config.base_url)}</small></td>
-      <td>${escape(config.api_model)}</td>
-      <td>${schedulePill(config) || '<span class="monitor-muted">未开启</span>'}</td>
-      <td>${statusPill(last)}${last ? `<small title="${escape(dateTime(last.started_at))}${lastNote}">${escape(dateTime(last.started_at))}${lastNote}</small>` : ""}</td>
-      <td>${success ? `<strong>${resultText(success)}</strong><small>${escape(dateTime(success.started_at))}</small>` : '<span class="monitor-muted">暂无成功记录</span>'}</td>
-      <td>${config.run_count} 条</td>
-    </tr>`;
+  // 每个配置一个 tbody、每个模型一行，配置、定时和记录列跨行；整组可点击进入详情，名称按钮承担键盘焦点。
+  function rowsHtml(config) {
+    const span = config.models.length;
+    const rows = config.models.map((model, index) => `<tr>
+      ${index ? "" : `<td rowspan="${span}"><button class="monitor-link" type="button" data-config-id="${escape(config.id)}">${escape(config.name)}</button><small>${escape(config.base_url)}</small></td>`}
+      <td class="monitor-model-name">${escape(model.api_model)}</td>
+      ${index ? "" : `<td rowspan="${span}">${schedulePill(config) || '<span class="monitor-muted">未开启</span>'}</td>`}
+      <td>${lastRunCell(model.last_run)}</td>
+      <td>${successCell(model.last_success)}</td>
+      ${index ? "" : `<td rowspan="${span}">${config.run_count} 条</td>`}
+    </tr>`).join("");
+    return `<tbody data-config-id="${escape(config.id)}">${rows}</tbody>`;
   }
 
   function renderList() {
@@ -97,7 +118,7 @@ export function bindApiMonitor(renderResult) {
     byId("monitor-grid").hidden = !view.configs.length || view.layout !== "cards";
     byId("monitor-table").hidden = !view.configs.length || view.layout !== "table";
     const container = listContainer();
-    const html = view.configs.map(view.layout === "table" ? rowHtml : cardHtml).join("");
+    const html = view.layout === "table" ? TABLE_HEAD + view.configs.map(rowsHtml).join("") : view.configs.map(cardHtml).join("");
     // 轮询刷新时内容不变就不重绘，避免键盘焦点丢失。
     if (html !== view.listHtml) {
       const focused = container.contains(document.activeElement) ? document.activeElement.dataset.configId : null;
@@ -152,7 +173,10 @@ export function bindApiMonitor(renderResult) {
     byId("monitor-crumb").textContent = config.name;
     byId("monitor-name").textContent = config.name;
     byId("monitor-url").textContent = config.base_url;
-    byId("monitor-model").textContent = config.api_model;
+    byId("monitor-model-count").textContent = `${config.api_models.length} 个`;
+    byId("monitor-run-meta").textContent = config.api_models.length > 1
+      ? `逐个测试全部 ${config.api_models.length} 个模型，每个模型目标 3 份有效回答、最多尝试 6 个挑战`
+      : "目标 3 份有效回答，最多尝试 6 个挑战";
     byId("monitor-stream").textContent = config.stream ? "流式" : "完整响应";
     byId("monitor-temperature").textContent = config.temperature ?? "接口默认";
     byId("monitor-interval").textContent = `${config.interval_minutes} 分钟`;
@@ -163,7 +187,22 @@ export function bindApiMonitor(renderResult) {
     // 进度与结果只属于发起测试的配置，切到其他配置时隐藏。
     byId("monitor-progress").hidden = view.runConfigId !== config.id;
     byId("monitor-run-result").hidden = view.runConfigId !== config.id || !view.runResult;
+    renderModelRows(config);
     renderSchedule();
+  }
+
+  function renderModelRows(config) {
+    const html = config.models.map((model) => `<tr>
+      <td class="monitor-model-name">${escape(model.api_model)}</td>
+      <td>${lastRunCell(model.last_run)}</td>
+      <td>${successCell(model.last_success)}</td>
+      <td><button class="monitor-link" type="button" data-test-model="${escape(model.api_model)}"${view.runBusy ? " disabled" : ""}>单独测试<span class="visually-hidden"> ${escape(model.api_model)}</span></button></td>
+    </tr>`).join("");
+    if (html === view.modelsHtml) return;
+    const focused = document.activeElement?.dataset.testModel;
+    byId("monitor-models-rows").innerHTML = html;
+    view.modelsHtml = html;
+    if (focused) byId("monitor-models-rows").querySelector(`[data-test-model="${CSS.escape(focused)}"]`)?.focus();
   }
 
   function showView(detailId) {
@@ -180,6 +219,7 @@ export function bindApiMonitor(renderResult) {
     }
     view.page = 0;
     view.rowsHtml = "";
+    view.modelsHtml = "";
     byId("monitor-records-rows").replaceChildren();
     byId("monitor-records-table").hidden = true;
     byId("monitor-pager").hidden = true;
@@ -227,7 +267,8 @@ export function bindApiMonitor(renderResult) {
       const pages = Math.max(1, Math.ceil(view.total / PAGE_SIZE));
       if (view.page >= pages) { view.page = pages - 1; return loadHistory(); }
       const html = history.items.map((run) => `<tr>
-        <td>${escape(dateTime(run.started_at))}${run.api_model !== config.api_model ? `<small>${escape(run.api_model)}</small>` : ""}</td>
+        <td>${escape(dateTime(run.started_at))}</td>
+        <td class="monitor-model-name">${escape(run.api_model)}</td>
         <td>${run.source === "scheduled" ? "定时" : "手动"}</td>
         <td><span class="monitor-pill" data-tone="${escape(run.status)}">${runStatus[run.status] || escape(run.status)}</span></td>
         <td class="monitor-result-cell">${run.status === "success" ? `<strong>${escape(run.prediction)}</strong> · ${percent(run.probability)}` : escape(run.error || "等待完成")}</td>
@@ -258,18 +299,100 @@ export function bindApiMonitor(renderResult) {
 
   function editConfig(config = null) {
     view.editingId = config?.id || null;
+    view.draftModels = [...(config?.api_models || [])];
+    view.fetchedModels = [];
+    modelsVersion++;
     byId("monitor-config-form").reset();
     byId("monitor-config-title").textContent = config ? "编辑配置" : "新建配置";
-    for (const [field, key] of [["name", "name"], ["base", "base_url"], ["model", "api_model"], ["temperature", "temperature"]]) {
+    for (const [field, key] of [["name", "name"], ["base", "base_url"], ["temperature", "temperature"]]) {
       byId(`config-${field}`).value = config?.[key] ?? "";
     }
     byId("config-stream").checked = config?.stream ?? true;
     byId("config-interval").value = config?.interval_minutes ?? 60;
     byId("config-key").required = !config;
     byId("config-key").placeholder = config ? "留空则保留已保存的密钥" : "";
+    byId("config-fetch-models").disabled = false;
+    byId("config-fetch-models").textContent = "获取模型";
+    byId("config-model-picker").hidden = true;
+    modelHint();
+    renderDraftModels();
     byId("monitor-config-error").textContent = "";
     configDialog.showModal();
     byId("config-name").focus();
+  }
+
+  function modelHint(text = MODEL_HINT, tone = "") {
+    byId("config-models-hint").textContent = text;
+    byId("config-models-hint").dataset.tone = tone;
+  }
+
+  // 已选模型渲染为标签；获取到的列表只同步勾选状态，不重绘，避免键盘勾选时丢失焦点。
+  function renderDraftModels() {
+    const input = byId("config-model-input");
+    byId("config-model-tags").innerHTML = view.draftModels.map((model) => `<li><span>${escape(model)}</span><button type="button" data-remove-model="${escape(model)}" aria-label="移除 ${escape(model)}">×</button></li>`).join("");
+    input.setCustomValidity(view.draftModels.length || input.value.trim() ? "" : "请至少添加一个模型");
+    for (const box of byId("config-model-options").querySelectorAll("input")) box.checked = view.draftModels.includes(box.value);
+  }
+
+  function renderModelOptions() {
+    const query = byId("config-model-search").value.trim().toLowerCase();
+    const shown = view.fetchedModels.filter((model) => model.toLowerCase().includes(query));
+    byId("config-model-options").innerHTML = shown.length
+      ? shown.map((model) => `<label class="monitor-model-option"><input type="checkbox" value="${escape(model)}"${view.draftModels.includes(model) ? " checked" : ""}><span>${escape(model)}</span></label>`).join("")
+      : '<p class="monitor-muted">没有匹配的模型</p>';
+  }
+
+  function addModels(models) {
+    let skipped = 0;
+    for (const model of models) {
+      if (view.draftModels.includes(model)) continue;
+      if (view.draftModels.length >= MAX_MODELS) skipped++;
+      else view.draftModels.push(model);
+    }
+    if (skipped) modelHint(`最多 ${MAX_MODELS} 个模型，已忽略 ${skipped} 个`, "error");
+    renderDraftModels();
+  }
+
+  function removeModel(model) {
+    view.draftModels = view.draftModels.filter((item) => item !== model);
+    modelHint();
+    renderDraftModels();
+  }
+
+  // 输入框中的文字按分隔符拆成模型；回车、保存或输入分隔符时提交。
+  function commitModelInput() {
+    const input = byId("config-model-input");
+    const models = splitModels(input.value);
+    input.value = "";
+    addModels(models);
+  }
+
+  async function fetchModels() {
+    const button = byId("config-fetch-models");
+    const version = ++modelsVersion;
+    button.disabled = true;
+    button.textContent = "获取中…";
+    modelHint("正在获取模型列表…");
+    try {
+      const { models } = await request("/api/test/models", jsonRequest("POST", {
+        base_url: byId("config-base").value.trim(), api_key: byId("config-key").value, config_id: view.editingId,
+      }));
+      if (version !== modelsVersion) return;
+      view.fetchedModels = models;
+      byId("config-model-search").value = "";
+      byId("config-model-picker").hidden = !models.length;
+      renderModelOptions();
+      if (!models.length) return modelHint("接口没有返回模型，请手动填写", "error");
+      modelHint(`已获取 ${models.length} 个模型，勾选即可添加；也可继续手动填写`);
+      byId("config-model-search").focus();
+    } catch (error) {
+      if (version === modelsVersion) modelHint(`获取模型失败：${error.message}`, "error");
+    } finally {
+      if (version === modelsVersion) {
+        button.disabled = false;
+        button.textContent = "获取模型";
+      }
+    }
   }
 
   async function saveConfig(event) {
@@ -279,10 +402,11 @@ export function bindApiMonitor(renderResult) {
     byId("monitor-config-save").disabled = true;
     byId("monitor-config-save").textContent = "保存中…";
     byId("monitor-config-error").textContent = "";
+    commitModelInput();
     try {
       const values = {
         name: byId("config-name").value.trim(), base_url: byId("config-base").value.trim(),
-        api_model: byId("config-model").value.trim(), api_key: byId("config-key").value,
+        api_models: view.draftModels, api_key: byId("config-key").value,
         temperature: byId("config-temperature").value === "" ? null : Number(byId("config-temperature").value),
         stream: byId("config-stream").checked, interval_minutes: Number(byId("config-interval").value),
       };
@@ -342,67 +466,102 @@ export function bindApiMonitor(renderResult) {
     }
   }
 
-  async function runTest() {
+  // 手动测试：多个模型逐个发起，每个模型一条测试记录；单个模型失败不影响后续模型。
+  async function runTest(models) {
     const config = current();
     if (!config || view.runBusy) return;
+    const queue = models || config.api_models;
+    const multiple = queue.length > 1;
     view.runBusy = true;
     view.runConfigId = config.id;
     view.runResult = false;
     const refocus = document.activeElement === byId("monitor-run");
-    const states = Array(6).fill("pending");
+    let states = [];
     let accepted = 0;
     let attempt = 0;
-    let body = "";
+    let prefix = "";
+    let currentModel = "";
+    let modelErrors = 0;
+    let succeeded = 0;
+    let lastResult = null;
     const renderProgress = (status) => {
-      if (status) byId("monitor-progress-status").textContent = status;
+      if (status) byId("monitor-progress-status").textContent = prefix + status;
       byId("monitor-progress-count").textContent = `有效 ${accepted}/3 · 已尝试 ${attempt}/6`;
       byId("monitor-progress-fill").style.width = `${accepted / 3 * 100}%`;
       byId("monitor-progress-steps").innerHTML = states.map((state, index) => `<span class="progress-step ${state}"><b>${index + 1}</b>挑战 ${index + 1} · ${stepLabels[state]}</span>`).join("");
     };
     const addError = (text) => {
       const item = document.createElement("li");
-      item.textContent = text;
+      item.textContent = multiple ? `${currentModel} · ${text}` : text;
+      modelErrors++;
       byId("monitor-test-errors").append(item);
     };
     message();
     byId("monitor-run-result").hidden = true;
     byId("monitor-test-errors").replaceChildren();
     byId("monitor-stream-output").hidden = !config.stream;
-    byId("monitor-stream-title").textContent = "当前挑战输出";
-    byId("monitor-stream-text").textContent = "等待上游输出…";
     renderDetail();
-    renderProgress("正在生成挑战，准备调用模型");
     try {
-      const response = await fetch("/api/test/runs", jsonRequest("POST", { config_id: config.id }));
-      const final = await readTestEvents(response, (event) => {
-        if (event.type === "challenge") {
-          attempt = event.attempt;
-          states[attempt - 1] = "working";
-          body = "";
-          byId("monitor-stream-text").textContent = "等待上游输出…";
-          renderProgress(`正在进行第 ${attempt} 次尝试，等待模型完整输出……`);
-        } else if (event.type === "delta") {
-          body += event.text;
-          byId("monitor-stream-text").textContent = body;
-          byId("monitor-stream-title").textContent = `当前挑战输出 · ${body.length} 字符`;
-        } else if (event.type === "challenge_result") {
-          states[event.attempt - 1] = event.accepted ? "done" : "invalid";
-          if (event.accepted) accepted++;
-          else addError(`挑战 ${event.attempt}：有效数字不足 ${event.parsed_numbers}/${event.minimum_numbers}`);
-          renderProgress(`当前已有 ${accepted}/3 份有效回答`);
-        } else if (event.type === "challenge_error") {
-          states[event.attempt - 1] = "error";
-          addError(`挑战 ${event.attempt}：${event.error}`);
-          renderProgress(`当前已有 ${accepted}/3 份有效回答`);
+      for (const [index, model] of queue.entries()) {
+        states = Array(6).fill("pending");
+        accepted = 0;
+        attempt = 0;
+        let body = "";
+        currentModel = model;
+        modelErrors = 0;
+        prefix = multiple ? `模型 ${index + 1}/${queue.length} · ${model}：` : "";
+        byId("monitor-stream-title").textContent = "当前挑战输出";
+        byId("monitor-stream-text").textContent = "等待上游输出…";
+        renderProgress("正在生成挑战，准备调用模型");
+        try {
+          const response = await fetch("/api/test/runs", jsonRequest("POST", { config_id: config.id, api_model: model }));
+          const final = await readTestEvents(response, (event) => {
+            if (event.type === "start") {
+              // 记录已创建，刷新后模型列表和测试记录立即显示「进行中」。
+              refresh();
+            } else if (event.type === "challenge") {
+              attempt = event.attempt;
+              states[attempt - 1] = "working";
+              body = "";
+              byId("monitor-stream-text").textContent = "等待上游输出…";
+              renderProgress(`正在进行第 ${attempt} 次尝试，等待模型完整输出……`);
+            } else if (event.type === "delta") {
+              body += event.text;
+              byId("monitor-stream-text").textContent = body;
+              byId("monitor-stream-title").textContent = `当前挑战输出 · ${body.length} 字符`;
+            } else if (event.type === "challenge_result") {
+              states[event.attempt - 1] = event.accepted ? "done" : "invalid";
+              if (event.accepted) accepted++;
+              else addError(`挑战 ${event.attempt}：有效数字不足 ${event.parsed_numbers}/${event.minimum_numbers}`);
+              renderProgress(`当前已有 ${accepted}/3 份有效回答`);
+            } else if (event.type === "challenge_error") {
+              states[event.attempt - 1] = "error";
+              addError(`挑战 ${event.attempt}：${event.error}`);
+              renderProgress(`当前已有 ${accepted}/3 份有效回答`);
+            }
+          });
+          states.forEach((state, stateIndex) => { if (state === "pending") states[stateIndex] = "skipped"; });
+          renderProgress(`测试完成：${final.result.used_outputs}/3 份有效回答进入归因`);
+          succeeded++;
+          lastResult = final.result;
+        } catch (error) {
+          renderProgress("测试未完成");
+          // 汇总错误会重复各挑战的原因；已逐条列出时只标记该模型失败。
+          if (multiple) addError(modelErrors ? "测试失败，未取得足够的有效回答" : error.message);
+          else if (view.detailId === config.id) message(error.message);
         }
-      });
-      states.forEach((state, index) => { if (state === "pending") states[index] = "skipped"; });
-      renderProgress(`测试完成：${final.result.used_outputs}/3 份有效回答进入归因`);
-      view.runResult = true;
-      if (view.detailId === config.id) renderResult(final.result, byId("monitor-run-result"));
-    } catch (error) {
-      renderProgress("测试未完成");
-      if (view.detailId === config.id) message(error.message);
+        if (index < queue.length - 1) await refresh();
+      }
+      if (multiple) {
+        prefix = "";
+        byId("monitor-progress-status").textContent = `全部完成：${succeeded}/${queue.length} 个模型测试成功，各模型结果见下方「模型」列表`;
+        byId("monitor-progress-count").textContent = `成功 ${succeeded}/${queue.length}`;
+        byId("monitor-progress-fill").style.width = `${succeeded / queue.length * 100}%`;
+        byId("monitor-progress-steps").replaceChildren();
+      } else if (lastResult) {
+        view.runResult = true;
+        if (view.detailId === config.id) renderResult(lastResult, byId("monitor-run-result"));
+      }
     } finally {
       view.runBusy = false;
       renderDetail();
@@ -480,7 +639,7 @@ export function bindApiMonitor(renderResult) {
   for (const button of document.querySelectorAll("[data-monitor-layout]")) {
     button.addEventListener("click", () => setLayout(button.dataset.monitorLayout));
   }
-  for (const id of ["monitor-grid", "monitor-table-rows"]) {
+  for (const id of ["monitor-grid", "monitor-table-content"]) {
     byId(id).addEventListener("click", (event) => {
       const target = event.target.closest("[data-config-id]");
       if (target) go(target.dataset.configId);
@@ -489,7 +648,11 @@ export function bindApiMonitor(renderResult) {
   byId("monitor-back").addEventListener("click", () => go(null));
   byId("monitor-edit").addEventListener("click", () => editConfig(current()));
   byId("monitor-delete").addEventListener("click", deleteConfig);
-  byId("monitor-run").addEventListener("click", runTest);
+  byId("monitor-run").addEventListener("click", () => runTest());
+  byId("monitor-models-rows").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-test-model]");
+    if (button) runTest([button.dataset.testModel]);
+  });
   byId("monitor-schedule-toggle").addEventListener("click", toggleSchedule);
   byId("monitor-records-refresh").addEventListener("click", () => loadHistory());
   byId("monitor-prev").addEventListener("click", () => { view.page = Math.max(0, view.page - 1); loadHistory(); });
@@ -499,6 +662,36 @@ export function bindApiMonitor(renderResult) {
     if (button) showRecord(button.dataset.runId);
   });
   byId("monitor-config-form").addEventListener("submit", saveConfig);
+  const modelInput = byId("config-model-input");
+  modelInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.isComposing) {
+      event.preventDefault();
+      commitModelInput();
+    } else if (event.key === "Backspace" && !modelInput.value && view.draftModels.length) {
+      removeModel(view.draftModels.at(-1));
+    }
+  });
+  // 输入或粘贴中出现分隔符时立即拆成标签。
+  modelInput.addEventListener("input", () => {
+    if (/[\s,，]/.test(modelInput.value)) commitModelInput();
+    else renderDraftModels();
+  });
+  byId("config-model-tags").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-remove-model]");
+    if (!button) return;
+    removeModel(button.dataset.removeModel);
+    modelInput.focus();
+  });
+  modelInput.parentElement.addEventListener("click", (event) => { if (event.target === event.currentTarget) modelInput.focus(); });
+  byId("config-fetch-models").addEventListener("click", fetchModels);
+  byId("config-model-search").addEventListener("input", renderModelOptions);
+  byId("config-model-search").addEventListener("keydown", (event) => { if (event.key === "Enter") event.preventDefault(); });
+  byId("config-model-options").addEventListener("change", (event) => {
+    const box = event.target;
+    if (!box.checked) return removeModel(box.value);
+    addModels([box.value]);
+    box.checked = view.draftModels.includes(box.value);
+  });
   configDialog.addEventListener("cancel", (event) => { if (view.configBusy) event.preventDefault(); });
   configDialog.addEventListener("close", () => { byId("config-key").value = ""; });
   recordDialog.addEventListener("close", () => { recordVersion++; });

@@ -1,18 +1,61 @@
-"""手动和定时测试共用的执行、进度和历史记录路径。"""
+"""手动和定时测试共用的执行、进度和历史记录路径，以及 API 配置的模型列表获取。"""
 from __future__ import annotations
 
+import json
 import logging
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from concurrent.futures import CancelledError
 from contextlib import closing
 from threading import Event
+from urllib.parse import urlencode
 
-from enrollment import iter_test_events
+from enrollment import _compact_upstream_error, iter_test_events, upstream_user_agent
 from testing_store import TestingStore
 
 
 logger = logging.getLogger(__name__)
+MAX_MODEL_PAGES = 20
+
+
+def models_url(base_url: str) -> str:
+    """与 completion_url 的地址规则一致：去掉聊天/消息端点后拼接 /v1/models。"""
+    normalized = base_url.rstrip("/").removesuffix("/chat/completions").removesuffix("/messages")
+    return normalized + ("/models" if normalized.endswith("/v1") else "/v1/models")
+
+
+def list_models(base_url: str, api_key: str) -> list[str]:
+    """读取上游模型 ID。OpenAI 与 Anthropic 都返回 {"data": [{"id": ...}]}，同时带两种鉴权头即可兼容；
+    Anthropic 分页时按 has_more / last_id 继续读取。"""
+    headers = {
+        "Authorization": f"Bearer {api_key}", "x-api-key": api_key, "anthropic-version": "2023-06-01",
+        "Accept": "application/json", "User-Agent": upstream_user_agent(),
+    }
+    url, models = models_url(base_url), []
+    for _ in range(MAX_MODEL_PAGES):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            with error:
+                details = error.read().decode("utf-8", errors="replace").strip()
+            logger.warning("list_models_http_error status=%s", error.code)
+            raise RuntimeError(f"HTTP {error.code}: {_compact_upstream_error(details, error.reason)}") from error
+        except OSError as error:
+            logger.warning("list_models_connection_error error_type=%s", type(error).__name__)
+            raise RuntimeError(f"无法连接接口：{getattr(error, 'reason', error)}") from error
+        except ValueError as error:
+            raise RuntimeError("接口未返回 JSON 格式的模型列表") from error
+        items = payload.get("data") if isinstance(payload, dict) else payload
+        if not isinstance(items, list):
+            raise RuntimeError("接口返回中没有模型列表（data 字段）")
+        models += [item.get("id") if isinstance(item, dict) else item for item in items]
+        if not (isinstance(payload, dict) and payload.get("has_more") and payload.get("last_id")):
+            break
+        url = f"{models_url(base_url)}?{urlencode({'after_id': payload['last_id']})}"
+    return sorted({model.strip() for model in models if isinstance(model, str) and model.strip()}, key=str.lower)
 
 
 def redact(value, api_key: str):

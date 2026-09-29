@@ -114,10 +114,10 @@
           <div id="monitor-list-message" class="message" role="status" hidden></div>
           <p id="monitor-loading" class="monitor-loading">正在读取配置…</p>
           <div id="monitor-grid" class="monitor-grid" hidden></div>
-          <div id="monitor-table" class="monitor-table table-wrap" role="region" aria-label="API 配置，可横向滚动" tabindex="0" hidden><table><thead><tr><th>配置</th><th>接口模型</th><th>定时</th><th>最近测试</th><th>最近成功结果</th><th>记录</th></tr></thead><tbody id="monitor-table-rows"></tbody></table></div>
+          <div id="monitor-table" class="monitor-table table-wrap" role="region" aria-label="API 配置，可横向滚动" tabindex="0" hidden><table id="monitor-table-content"></table></div>
           <section id="monitor-empty" class="monitor-empty" hidden>
             <strong>还没有 API 配置</strong>
-            <p>保存接口地址、API Key 和模型后，可以随时测试，也可以按间隔定时测试。</p>
+            <p>保存接口地址、API Key 和一个或多个模型后，可以随时测试，也可以按间隔定时测试。</p>
             <button id="monitor-empty-new" class="button primary" type="button">新建配置</button>
           </section>
         </div>
@@ -130,14 +130,14 @@
           </div>
           <div id="monitor-detail-message" class="message" role="status" hidden></div>
           <div class="monitor-facts">
-            <div><span>接口模型</span><strong id="monitor-model"></strong></div>
+            <div><span>模型</span><strong id="monitor-model-count"></strong></div>
             <div><span>输出方式</span><strong id="monitor-stream"></strong></div>
             <div><span>温度</span><strong id="monitor-temperature"></strong></div>
             <div><span>定时间隔</span><strong id="monitor-interval"></strong></div>
           </div>
           <section class="monitor-actions" aria-label="测试操作">
             <div class="monitor-action-row">
-              <div><strong>手动测试</strong><span>目标 3 份有效回答，最多尝试 6 个挑战</span></div>
+              <div><strong>手动测试</strong><span id="monitor-run-meta"></span></div>
               <button id="monitor-run" class="button primary" type="button">立即测试</button>
             </div>
             <div class="monitor-action-row monitor-switch-row">
@@ -153,11 +153,15 @@
             <div id="monitor-stream-output" class="stream-output" hidden><strong id="monitor-stream-title">当前挑战输出</strong><pre id="monitor-stream-text" tabindex="0" aria-label="当前挑战输出"></pre></div>
           </section>
           <section id="monitor-run-result" class="result-panel" hidden aria-live="polite"></section>
+          <section class="monitor-records monitor-models" aria-labelledby="monitor-models-heading">
+            <div class="panel-toolbar"><div><strong id="monitor-models-heading">模型</strong><span>各模型最近一次测试与最近一次成功结果</span></div></div>
+            <div class="monitor-records-body"><div class="table-wrap" role="region" aria-label="各模型最近结果，可横向滚动" tabindex="0"><table><thead><tr><th>模型</th><th>最近测试</th><th>最近成功结果</th><th><span class="visually-hidden">操作</span></th></tr></thead><tbody id="monitor-models-rows"></tbody></table></div></div>
+          </section>
           <section id="monitor-records" class="monitor-records" aria-labelledby="monitor-records-heading">
             <div class="panel-toolbar"><div><strong id="monitor-records-heading">测试记录</strong><span id="monitor-records-count"></span></div><button id="monitor-records-refresh" class="button secondary" type="button">刷新</button></div>
             <div class="monitor-records-body">
               <p id="monitor-records-empty" class="monitor-records-empty">正在读取测试记录…</p>
-              <div id="monitor-records-table" class="table-wrap" role="region" aria-label="测试记录，可横向滚动" tabindex="0" hidden><table><thead><tr><th>开始时间</th><th>来源</th><th>状态</th><th>归因结果 / 原因</th><th>耗时</th><th><span class="visually-hidden">操作</span></th></tr></thead><tbody id="monitor-records-rows"></tbody></table></div>
+              <div id="monitor-records-table" class="table-wrap" role="region" aria-label="测试记录，可横向滚动" tabindex="0" hidden><table><thead><tr><th>开始时间</th><th>模型</th><th>来源</th><th>状态</th><th>归因结果 / 原因</th><th>耗时</th><th><span class="visually-hidden">操作</span></th></tr></thead><tbody id="monitor-records-rows"></tbody></table></div>
             </div>
             <div id="monitor-pager" class="monitor-pager" hidden><span id="monitor-page"></span><div><button id="monitor-prev" class="button secondary" type="button">上一页</button><button id="monitor-next" class="button secondary" type="button">下一页</button></div></div>
           </section>
@@ -169,8 +173,19 @@
             <div class="form-grid two">
               <label class="monitor-field-wide"><span>配置名称</span><input id="config-name" required maxlength="100" placeholder="例如：主力接口"></label>
               <label class="monitor-field-wide"><span>Base URL</span><input id="config-base" type="url" required placeholder="https://example.com/v1"></label>
-              <label><span>接口模型名</span><input id="config-model" required placeholder="实际请求使用的模型名"></label>
-              <label><span>API Key</span><input id="config-key" type="password" autocomplete="off" required></label>
+              <label class="monitor-field-wide"><span>API Key</span><input id="config-key" type="password" autocomplete="off" required></label>
+              <div class="monitor-field-wide monitor-models-field">
+                <div class="monitor-models-head"><label for="config-model-input">接口模型</label><button id="config-fetch-models" class="monitor-link" type="button">获取模型</button></div>
+                <div class="monitor-model-box">
+                  <ul id="config-model-tags" class="monitor-model-tags" aria-label="已添加的模型"></ul>
+                  <input id="config-model-input" autocomplete="off" aria-describedby="config-models-hint" placeholder="输入模型名后回车，可粘贴多个">
+                </div>
+                <small id="config-models-hint" class="monitor-field-hint" role="status"></small>
+                <div id="config-model-picker" class="monitor-model-picker" hidden>
+                  <input id="config-model-search" type="search" autocomplete="off" placeholder="搜索获取到的模型" aria-label="搜索获取到的模型">
+                  <div id="config-model-options" class="monitor-model-options" role="group" aria-label="获取到的模型"></div>
+                </div>
+              </div>
               <label><span>温度（可选）</span><input id="config-temperature" type="number" min="0" max="2" step="any" placeholder="接口默认"></label>
               <label><span>定时间隔（分钟）</span><input id="config-interval" type="number" min="1" max="1440" step="any" value="60" required></label>
               <label class="monitor-field-wide checkbox-label"><input id="config-stream" type="checkbox" checked><span>流式输出<small>逐段显示当前挑战的回答；接口不支持流式时关闭</small></span></label>

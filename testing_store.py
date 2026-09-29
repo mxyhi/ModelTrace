@@ -21,7 +21,7 @@ class TestingStore:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS api_configs (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, base_url TEXT NOT NULL,
-                    api_model TEXT NOT NULL, api_key TEXT NOT NULL, temperature REAL,
+                    api_models TEXT NOT NULL, api_key TEXT NOT NULL, temperature REAL,
                     stream INTEGER NOT NULL, interval_minutes REAL NOT NULL,
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
@@ -35,6 +35,15 @@ class TestingStore:
                 CREATE INDEX IF NOT EXISTS test_runs_started ON test_runs(started_at DESC);
                 CREATE INDEX IF NOT EXISTS test_runs_config ON test_runs(config_id, started_at DESC);
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(api_configs)")}
+            if "api_model" in columns:
+                # 迁移：旧版每个配置只有一个模型，列改名为 api_models 并把值改为 JSON 数组；改名与改值在同一事务内。
+                db.execute("BEGIN")
+                db.execute("ALTER TABLE api_configs RENAME COLUMN api_model TO api_models")
+                db.executemany("UPDATE api_configs SET api_models=? WHERE id=?", [
+                    (json.dumps([row["api_models"]], ensure_ascii=False), row["id"])
+                    for row in db.execute("SELECT id, api_models FROM api_configs").fetchall()
+                ])
             # 单进程服务重启意味着旧请求已终止，不能永远显示“正在测试”。
             db.execute("UPDATE test_runs SET status='error', error=?, finished_at=? WHERE status='running'",
                        ("本地服务已重启，本次测试未完成", utc_now()))
@@ -50,34 +59,42 @@ class TestingStore:
             db.close()
 
     @staticmethod
-    def public_config(row: sqlite3.Row | dict) -> dict:
+    def decoded_config(row: sqlite3.Row) -> dict:
         value = dict(row)
-        value["has_api_key"] = bool(value.pop("api_key"))
         value["stream"] = bool(value["stream"])
+        value["api_models"] = json.loads(value["api_models"])
+        return value
+
+    @classmethod
+    def public_config(cls, row: sqlite3.Row) -> dict:
+        value = cls.decoded_config(row)
+        value["has_api_key"] = bool(value.pop("api_key"))
         return value
 
     def configs(self) -> list[dict]:
-        """配置列表附带记录数、最近一次测试和最近一次成功测试，供 API 监测卡片与表格直接展示。"""
+        """配置列表附带记录数、最近一次测试，以及每个模型最近一次测试和最近一次成功测试，供卡片与表格直接展示。"""
+        latest = """SELECT * FROM (SELECT config_id, api_model, status, started_at, prediction, probability,
+            used_outputs, error, row_number() OVER (
+                PARTITION BY config_id, api_model ORDER BY started_at DESC, id DESC) AS position
+            FROM test_runs WHERE config_id IS NOT NULL{}) WHERE position=1"""
         with self.connection() as db:
-            rows = db.execute("""SELECT c.*, (SELECT count(*) FROM test_runs WHERE config_id=c.id) AS run_count,
-                r.status AS last_status, r.started_at AS last_started_at, r.prediction AS last_prediction,
-                r.probability AS last_probability, r.error AS last_error,
-                s.started_at AS success_started_at, s.prediction AS success_prediction,
-                s.probability AS success_probability, s.used_outputs AS success_used_outputs
-                FROM api_configs c LEFT JOIN test_runs r ON r.id=(
-                    SELECT id FROM test_runs WHERE config_id=c.id ORDER BY started_at DESC, id DESC LIMIT 1)
-                LEFT JOIN test_runs s ON s.id=(
-                    SELECT id FROM test_runs WHERE config_id=c.id AND status='success'
-                    ORDER BY started_at DESC, id DESC LIMIT 1)
-                ORDER BY c.created_at, c.id""").fetchall()
+            rows = db.execute("""SELECT c.*, (SELECT count(*) FROM test_runs WHERE config_id=c.id) AS run_count
+                FROM api_configs c ORDER BY c.created_at, c.id""").fetchall()
+            last_runs = db.execute(latest.format("")).fetchall()
+            successes = db.execute(latest.format(" AND status='success'")).fetchall()
+        runs = {(row["config_id"], row["api_model"]): {key: row[key] for key in row.keys() if key not in ("config_id", "position")}
+                for row in last_runs}
+        success = {(row["config_id"], row["api_model"]): {key: row[key] for key in ("started_at", "prediction", "probability", "used_outputs")}
+                   for row in successes}
         configs = []
         for row in rows:
-            value = dict(row)
-            last = {key.removeprefix("last_"): value.pop(key) for key in list(value) if key.startswith("last_")}
-            success = {key.removeprefix("success_"): value.pop(key) for key in list(value) if key.startswith("success_")}
-            value = self.public_config(value)
-            value["last_run"] = last if last["status"] else None
-            value["last_success"] = success if success["started_at"] else None
+            value = self.public_config(row)
+            value["models"] = [{
+                "api_model": model, "last_run": runs.get((value["id"], model)), "last_success": success.get((value["id"], model)),
+            } for model in value["api_models"]]
+            # 最近一次测试也统计已从配置移除的模型，与记录数口径一致。
+            own = [run for (config_id, _), run in runs.items() if config_id == value["id"]]
+            value["last_run"] = max(own, key=lambda run: run["started_at"]) if own else None
             configs.append(value)
         return configs
 
@@ -86,27 +103,26 @@ class TestingStore:
             row = db.execute("SELECT * FROM api_configs WHERE id=?", (config_id,)).fetchone()
         if row is None:
             raise LookupError("API 配置不存在")
-        value = dict(row) if include_key else self.public_config(row)
-        value["stream"] = bool(value["stream"])
-        return value
+        return self.decoded_config(row) if include_key else self.public_config(row)
 
     def save_config(self, values: dict, config_id: str | None = None) -> dict:
         now = utc_now()
+        models = json.dumps(values["api_models"], ensure_ascii=False)
         if config_id is None:
             config_id = secrets.token_hex(12)
             with self.connection() as db:
                 db.execute("""INSERT INTO api_configs
-                    (id,name,base_url,api_model,api_key,temperature,stream,interval_minutes,created_at,updated_at)
+                    (id,name,base_url,api_models,api_key,temperature,stream,interval_minutes,created_at,updated_at)
                     VALUES (?,?,?,?,?,?,?,?,?,?)""", (
-                    config_id, values["name"], values["base_url"], values["api_model"], values["api_key"],
+                    config_id, values["name"], values["base_url"], models, values["api_key"],
                     values["temperature"], values["stream"], values["interval_minutes"], now, now,
                 ))
         else:
             with self.connection() as db:
-                updated = db.execute("""UPDATE api_configs SET name=?,base_url=?,api_model=?,
+                updated = db.execute("""UPDATE api_configs SET name=?,base_url=?,api_models=?,
                     api_key=CASE WHEN ?='' THEN api_key ELSE ? END,temperature=?,stream=?,interval_minutes=?,updated_at=?
                     WHERE id=?""", (
-                    values["name"], values["base_url"], values["api_model"], values.get("api_key", ""), values.get("api_key", ""),
+                    values["name"], values["base_url"], models, values.get("api_key", ""), values.get("api_key", ""),
                     values["temperature"], values["stream"], values["interval_minutes"], now, config_id,
                 ))
                 if not updated.rowcount:

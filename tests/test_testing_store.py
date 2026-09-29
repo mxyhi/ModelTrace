@@ -1,7 +1,10 @@
 import os
+import io
 import json
+import sqlite3
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from threading import Event
 from unittest.mock import patch
@@ -13,7 +16,7 @@ from testing_store import TestingStore
 from test_scheduler import TestScheduler
 
 
-VALUES = {"name": "测试配置", "base_url": "https://example.test/v1", "api_model": "mock",
+VALUES = {"name": "测试配置", "base_url": "https://example.test/v1", "api_models": ["mock"],
           "api_key": "local-test-secret", "temperature": None, "stream": True, "interval_minutes": 60}
 
 
@@ -34,6 +37,9 @@ class PersistedTestingTests(unittest.TestCase):
         self.assertNotIn(VALUES["api_key"], response.text)
         return response.json["config"]
 
+    def started(self, config_id: str, source: str = "manual", model: str = "mock") -> str:
+        return self.store.start_run({**self.store.config(config_id, include_key=True), "api_model": model}, source)
+
     def test_configs_persist_and_blank_key_edit_preserves_secret(self):
         config = self.create()
         edited = self.client.patch(f"/api/test/configs/{config['id']}", json={"name": "已编辑", "api_key": ""})
@@ -46,20 +52,42 @@ class PersistedTestingTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/test/configs").json["key_storage"], "local")
 
     def test_config_validation_and_not_found(self):
-        for values in ({"name": ""}, {"api_key": ""}, {"interval_minutes": 0}, {"stream": "true"}, {"base_url": "file:///tmp"}):
+        for values in ({"name": ""}, {"api_key": ""}, {"interval_minutes": 0}, {"stream": "true"}, {"base_url": "file:///tmp"},
+                       {"api_models": []}, {"api_models": "mock"}, {"api_models": [" "]}, {"api_models": [f"m{i}" for i in range(21)]}):
             self.assertEqual(self.client.post("/api/test/configs", json={**VALUES, **values}).status_code, 400)
         self.assertEqual(self.client.patch("/api/test/configs/missing", json={"name": "test"}).status_code, 404)
-        self.assertEqual(self.client.post("/api/test/runs", json={"config_id": "missing"}).status_code, 404)
+        self.assertEqual(self.client.post("/api/test/runs", json={"config_id": "missing", "api_model": "mock"}).status_code, 404)
+        config = self.create()
+        for model in (None, "other"):
+            self.assertEqual(self.client.post("/api/test/runs", json={"config_id": config["id"], "api_model": model}).status_code, 400)
+
+    def test_models_are_trimmed_deduplicated_and_kept_in_order(self):
+        config = self.create(api_models=[" b ", "a", "b", ""])
+        self.assertEqual(config["api_models"], ["b", "a"])
+        edited = self.client.patch(f"/api/test/configs/{config['id']}", json={"api_models": ["c"]}).json["config"]
+        self.assertEqual(edited["api_models"], ["c"])
+
+    def test_single_model_configs_are_migrated_to_model_lists(self):
+        with sqlite3.connect(self.path) as db:
+            db.execute("DROP TABLE api_configs")
+            db.execute("""CREATE TABLE api_configs (id TEXT PRIMARY KEY, name TEXT NOT NULL, base_url TEXT NOT NULL,
+                api_model TEXT NOT NULL, api_key TEXT NOT NULL, temperature REAL, stream INTEGER NOT NULL,
+                interval_minutes REAL NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+            db.execute("INSERT INTO api_configs VALUES ('old','旧配置','https://example.test/v1','old-model','key',NULL,1,60,'t','t')")
+        db.close()
+        store = TestingStore(self.path)
+        self.assertEqual(store.config("old")["api_models"], ["old-model"])
+        self.assertEqual(TestingStore(self.path).config("old", include_key=True)["api_key"], "key")
 
     def test_manual_run_saves_result_and_configuration_snapshot(self):
         config = self.create()
         with patch("enrollment.iter_completion", side_effect=lambda *args, **kwargs: (part for part in ["7, " * 320])):
-            response = self.client.post("/api/test/runs", json={"config_id": config["id"]})
+            response = self.client.post("/api/test/runs", json={"config_id": config["id"], "api_model": "mock"})
             packets = [json.loads(line) for line in response.data.splitlines()]
         self.assertEqual(packets[-1]["type"], "result")
         self.assertEqual(packets[-1]["result"]["used_outputs"], 3)
         run_id = packets[-1]["run_id"]
-        self.client.patch(f"/api/test/configs/{config['id']}", json={"name": "改名后", "api_model": "another-model"})
+        self.client.patch(f"/api/test/configs/{config['id']}", json={"name": "改名后", "api_models": ["another-model"]})
         run = self.client.get(f"/api/test/history/{run_id}").json["run"]
         self.assertEqual(run["status"], "success")
         self.assertEqual(run["source"], "manual")
@@ -71,7 +99,7 @@ class PersistedTestingTests(unittest.TestCase):
     def test_failure_saved_and_secret_redacted(self):
         config = self.create()
         with patch("enrollment.iter_completion", side_effect=RuntimeError("failed " + VALUES["api_key"])):
-            response = self.client.post("/api/test/runs", json={"config_id": config["id"]})
+            response = self.client.post("/api/test/runs", json={"config_id": config["id"], "api_model": "mock"})
             packets = [json.loads(line) for line in response.data.splitlines()]
         self.assertEqual(packets[-1]["type"], "error")
         self.assertNotIn(VALUES["api_key"], response.text)
@@ -83,7 +111,7 @@ class PersistedTestingTests(unittest.TestCase):
     def test_disconnected_manual_run_becomes_cancelled(self):
         config = self.create()
         with patch("enrollment.iter_completion", side_effect=lambda *args, **kwargs: (part for part in ["7, " * 160, "8, " * 160])):
-            response = self.client.post("/api/test/runs", json={"config_id": config["id"]}, buffered=False)
+            response = self.client.post("/api/test/runs", json={"config_id": config["id"], "api_model": "mock"}, buffered=False)
             packets = iter(response.response)
             run_id = json.loads(next(packets))["run_id"]
             self.assertEqual(json.loads(next(packets))["type"], "challenge")
@@ -91,20 +119,28 @@ class PersistedTestingTests(unittest.TestCase):
             response.close()
         self.assertEqual(self.store.run(run_id)["status"], "cancelled")
 
-    def test_scheduled_runs_use_the_same_history(self):
-        config = self.create(stream=False)
-        with patch("enrollment.iter_completion", side_effect=lambda *args, **kwargs: (part for part in ["9, " * 320])):
-            result = web.run_scheduled_test(self.store.config(config["id"], include_key=True), Event())
-        self.assertEqual(result["used_outputs"], 3)
-        record = self.store.history(config["id"], 20, 0)["items"][0]
-        self.assertEqual(record["source"], "scheduled")
-        self.assertEqual(record["status"], "success")
+    def test_scheduled_round_tests_each_model_in_order(self):
+        config = self.create(stream=False, api_models=["good", "bad"])
+
+        def completion(*args, **kwargs):
+            if args[2] == "bad":
+                raise RuntimeError("bad model")
+            return (part for part in ["9, " * 320])
+
+        with patch("enrollment.iter_completion", side_effect=completion):
+            web.run_scheduled_test(self.store.config(config["id"], include_key=True), Event())
+            records = self.store.history(config["id"], 20, 0)["items"]
+            # 单个模型失败不影响其他模型；全部失败时本轮失败。
+            self.assertEqual({record["api_model"]: record["status"] for record in records}, {"good": "success", "bad": "error"})
+            self.assertEqual({record["source"] for record in records}, {"scheduled"})
+            only_bad = self.create(api_models=["bad"])
+            with self.assertRaisesRegex(RuntimeError, "bad"):
+                web.run_scheduled_test(self.store.config(only_bad["id"], include_key=True), Event())
 
     def test_pagination_filter_and_delete_removes_config_history(self):
         first, second = self.create(), self.create(name="配置二")
         for config_id in [first["id"], second["id"], first["id"]]:
-            run = self.store.start_run(self.store.config(config_id, include_key=True), "manual")
-            self.store.finish_run(run, "error", .1, error="测试失败")
+            self.store.finish_run(self.started(config_id), "error", .1, error="测试失败")
         response = self.client.get(f"/api/test/history?config_id={first['id']}&limit=1&offset=1")
         self.assertEqual(response.json["total"], 2)
         self.assertEqual(len(response.json["items"]), 1)
@@ -116,31 +152,33 @@ class PersistedTestingTests(unittest.TestCase):
         self.assertEqual(history["items"][0]["config_id"], second["id"])
         self.assertEqual(self.client.get("/api/test/history?limit=10000").status_code, 400)
 
-    def test_config_list_includes_run_count_and_latest_run(self):
-        first, second = self.create(), self.create(name="配置二")
-        failed = self.store.start_run(self.store.config(first["id"], include_key=True), "manual")
-        self.store.finish_run(failed, "error", .1, error="测试失败")
-        succeeded = self.store.start_run(self.store.config(first["id"], include_key=True), "scheduled")
+    def test_config_list_includes_run_count_and_latest_run_per_model(self):
+        first, second = self.create(api_models=["mock", "other"]), self.create(name="配置二")
+        self.store.finish_run(self.started(first["id"]), "error", .1, error="测试失败")
+        succeeded = self.started(first["id"], "scheduled")
         self.store.finish_run(succeeded, "success", .2, result={"prediction_name": "mock", "probability": .9, "used_outputs": 3})
         # 最近一次失败时，仍要能看到之前最近一次成功的结果。
-        latest = self.store.start_run(self.store.config(first["id"], include_key=True), "manual")
-        self.store.finish_run(latest, "error", .1, error="最新失败")
+        self.store.finish_run(self.started(first["id"]), "error", .1, error="最新失败")
+        self.store.finish_run(self.started(first["id"], model="other"), "error", .1, error="其他模型失败")
         configs = {config["id"]: config for config in self.client.get("/api/test/configs").json["configs"]}
-        self.assertEqual(configs[first["id"]]["run_count"], 3)
-        self.assertEqual(configs[first["id"]]["last_run"]["status"], "error")
-        self.assertEqual(configs[first["id"]]["last_run"]["error"], "最新失败")
-        self.assertEqual(configs[first["id"]]["last_success"]["prediction"], "mock")
-        self.assertEqual(configs[first["id"]]["last_success"]["probability"], .9)
-        self.assertEqual(configs[first["id"]]["last_success"]["used_outputs"], 3)
+        mock, other = configs[first["id"]]["models"]
+        self.assertEqual(configs[first["id"]]["run_count"], 4)
+        self.assertEqual(configs[first["id"]]["last_run"]["api_model"], "other")
+        self.assertEqual((mock["api_model"], other["api_model"]), ("mock", "other"))
+        self.assertEqual(mock["last_run"]["status"], "error")
+        self.assertEqual(mock["last_run"]["error"], "最新失败")
+        self.assertEqual(mock["last_success"], {"started_at": mock["last_success"]["started_at"], "prediction": "mock", "probability": .9, "used_outputs": 3})
+        self.assertEqual(other["last_run"]["error"], "其他模型失败")
+        self.assertIsNone(other["last_success"])
         self.assertEqual(configs[second["id"]]["run_count"], 0)
         self.assertIsNone(configs[second["id"]]["last_run"])
-        self.assertIsNone(configs[second["id"]]["last_success"])
+        self.assertEqual(configs[second["id"]]["models"], [{"api_model": "mock", "last_run": None, "last_success": None}])
         self.assertNotIn(VALUES["api_key"], json.dumps(configs))
         self.assertTrue(all("api_key" not in config for config in configs.values()))
 
     def test_restart_marks_interrupted_run_as_failed(self):
         config = self.create()
-        run_id = self.store.start_run(self.store.config(config["id"], include_key=True), "manual")
+        run_id = self.started(config["id"])
         run = TestingStore(self.path).run(run_id)
         self.assertEqual(run["status"], "error")
         self.assertIn("重启", run["error"])
@@ -164,23 +202,55 @@ class PersistedTestingTests(unittest.TestCase):
                 self.assertEqual(status.json["config_id"], config["id"])
                 self.assertTrue(entered.wait(1))
                 self.assertEqual(self.client.delete(f"/api/test/configs/{config['id']}").status_code, 409)
-                self.client.patch(f"/api/test/configs/{config['id']}", json={"api_model": "changed", "stream": False})
+                self.client.patch(f"/api/test/configs/{config['id']}", json={"api_models": ["changed"], "stream": False})
             finally:
                 scheduler.stop()
                 release.set()
                 scheduler._thread.join(2)
-            self.assertEqual(snapshots[0]["api_model"], "mock")
+            self.assertEqual(snapshots[0]["api_models"], ["mock"])
             self.assertTrue(snapshots[0]["stream"])
             self.assertEqual(self.client.delete(f"/api/test/configs/{config['id']}").status_code, 200)
 
     def test_nonstream_run_records_result_without_body_deltas(self):
         config = self.create(stream=False)
         with patch("enrollment.iter_completion", side_effect=lambda *args, **kwargs: (part for part in ["8, " * 320])):
-            response = self.client.post("/api/test/runs", json={"config_id": config["id"]})
+            response = self.client.post("/api/test/runs", json={"config_id": config["id"], "api_model": "mock"})
             packets = [json.loads(line) for line in response.data.splitlines()]
         self.assertNotIn("delta", [packet["type"] for packet in packets])
         self.assertEqual(packets[-1]["type"], "result")
         self.assertFalse(self.store.run(packets[-1]["run_id"])["config_snapshot"]["stream"])
+
+
+    def test_fetch_models_supports_both_formats_and_saved_key(self):
+        pages = [{"data": [{"id": "b-model"}, {"id": "A-model"}], "has_more": True, "last_id": "b-model"},
+                 {"data": [{"id": "b-model"}, {"id": "c-model"}], "has_more": False}]
+        requests = []
+
+        def urlopen(request, timeout):
+            requests.append(request)
+            return io.BytesIO(json.dumps(pages[len(requests) - 1]).encode())
+
+        config = self.create()
+        with patch("urllib.request.urlopen", side_effect=urlopen):
+            response = self.client.post("/api/test/models", json={"base_url": "https://example.test/v1/chat/completions", "api_key": "", "config_id": config["id"]})
+        self.assertEqual(response.json, {"models": ["A-model", "b-model", "c-model"]})
+        self.assertEqual([request.full_url for request in requests],
+                         ["https://example.test/v1/models", "https://example.test/v1/models?after_id=b-model"])
+        self.assertEqual(requests[0].get_header("X-api-key"), VALUES["api_key"])
+        self.assertEqual(requests[0].get_header("Authorization"), f"Bearer {VALUES['api_key']}")
+
+    def test_fetch_models_validation_and_redacted_errors(self):
+        for payload in ({"base_url": "file:///tmp", "api_key": "k"}, {"base_url": "https://example.test", "api_key": ""}):
+            self.assertEqual(self.client.post("/api/test/models", json=payload).status_code, 400)
+        self.assertEqual(self.client.post("/api/test/models", json={"base_url": "https://example.test", "config_id": "missing"}).status_code, 404)
+        failure = urllib.error.HTTPError("https://example.test/v1/models", 401, "Unauthorized", {}, io.BytesIO(b'{"error": {"message": "bad key secret-key"}}'))
+        with patch("urllib.request.urlopen", side_effect=failure):
+            response = self.client.post("/api/test/models", json={"base_url": "https://example.test", "api_key": "secret-key"})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("HTTP 401", response.json["error"])
+        self.assertNotIn("secret-key", response.text)
+        with patch("urllib.request.urlopen", return_value=io.BytesIO(b"<html>")):
+            self.assertEqual(self.client.post("/api/test/models", json={"base_url": "https://example.test", "api_key": "k"}).status_code, 502)
 
 
 if __name__ == "__main__":

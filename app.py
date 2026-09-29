@@ -7,6 +7,7 @@ import re
 import secrets
 from pathlib import Path
 from contextlib import closing
+from concurrent.futures import CancelledError
 from threading import Event, Lock
 from urllib.parse import urlsplit
 
@@ -14,7 +15,7 @@ from flask import Flask, Response, jsonify, render_template, request
 
 from enrollment import bank_summary, enroll_automatic, iter_completion, request_completion
 from test_scheduler import TestScheduler
-from testing_service import collect_recorded_test, recorded_test
+from testing_service import collect_recorded_test, list_models, recorded_test
 from testing_store import TestingStore
 from fingerprint import analyze_global_outputs, generate_challenges, load_bank, parse_numbers
 from bank_builder import build_bank, read_rows
@@ -27,6 +28,7 @@ UNIFIED_BANK_FILE = PROJECT / "data" / "unified_bank.json"
 DEFAULT_BANK_ID = "claude"
 # 测试和临时验证用 MODELTRACE_TESTING_DB 指向独立库；启动时会把本库中未完成的记录标为中断。
 testing_store = TestingStore(Path(os.environ.get("MODELTRACE_TESTING_DB") or PROJECT / "data" / "local" / "testing.sqlite3"))
+MAX_CONFIG_MODELS = 20
 
 
 def builtin_configs() -> dict[str, dict]:
@@ -151,8 +153,21 @@ def test_configuration(payload: dict) -> dict:
     return {**configuration, "temperature": temperature, "stream": stream, "api_format": "auto"}
 
 
-def run_scheduled_test(configuration: dict, cancel: Event) -> dict:
-    return collect_recorded_test(testing_store, configuration, "scheduled", unified_bank, summarized_unified_bank(), cancel)
+def run_scheduled_test(configuration: dict, cancel: Event) -> None:
+    """定时一轮：按顺序测试配置中的每个模型，各写一条测试记录；单个模型失败不影响后续模型，全部失败时本轮记为失败。"""
+    errors = []
+    for model in configuration["api_models"]:
+        if cancel.is_set():
+            raise CancelledError()
+        try:
+            collect_recorded_test(testing_store, {**configuration, "api_model": model}, "scheduled",
+                                  unified_bank, summarized_unified_bank(), cancel)
+        except CancelledError:
+            raise
+        except Exception as error:
+            errors.append(f"{model}：{error}")
+    if len(errors) == len(configuration["api_models"]):
+        raise RuntimeError("；".join(errors))
 
 
 test_schedule = TestScheduler(run_scheduled_test)
@@ -165,6 +180,16 @@ def load_test_config(payload: dict) -> dict:
     if not isinstance(config_id, str) or not config_id:
         raise ValueError("请选择已保存的 API 配置")
     return testing_store.config(config_id, include_key=True)
+
+
+def requested_models(value) -> list[str]:
+    """配置中的模型列表：去掉空白和重复项，保持填写顺序。"""
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("api_models 必须是模型名列表")
+    models = list(dict.fromkeys(item.strip() for item in value if item.strip()))
+    if not 1 <= len(models) <= MAX_CONFIG_MODELS:
+        raise ValueError(f"请填写 1–{MAX_CONFIG_MODELS} 个模型")
+    return models
 
 
 def saved_config_values(payload: dict, config_id: str | None = None) -> dict:
@@ -180,12 +205,15 @@ def saved_config_values(payload: dict, config_id: str | None = None) -> dict:
     interval = float(values["interval_minutes"])
     if not math.isfinite(interval) or not 1 <= interval <= 1440:
         raise ValueError("测试间隔必须在 1 到 1440 分钟之间")
-    configuration = test_configuration(values)
+    models = requested_models(values.get("api_models"))
+    # 连接参数沿用单模型测试的校验，模型列表单独保存。
+    configuration = test_configuration({**values, "api_model": models[0]})
     configuration.pop("api_format")
+    configuration.pop("api_model")
     # 编辑时空密钥交给 UPDATE 原子保留，避免并发修改将旧密钥写回。
     if config_id and not payload.get("api_key"):
         configuration["api_key"] = ""
-    return {**configuration, "name": name.strip(), "interval_minutes": interval}
+    return {**configuration, "name": name.strip(), "interval_minutes": interval, "api_models": models}
 
 
 @app.route("/api/test/configs", methods=["GET", "POST"])
@@ -218,10 +246,42 @@ def test_config_detail(config_id: str):
         return jsonify({"error": str(error)}), 400
 
 
+@app.post("/api/test/models")
+def list_config_models():
+    """用填写的 Base URL 和 Key 获取上游模型列表；编辑配置时 Key 留空则使用已保存的密钥。"""
+    payload = request.get_json(silent=True)
+    try:
+        if not isinstance(payload, dict):
+            raise ValueError("请求内容必须是 JSON 对象")
+        base_url, api_key, config_id = payload.get("base_url"), payload.get("api_key") or "", payload.get("config_id")
+        if not isinstance(base_url, str) or not isinstance(api_key, str) or not isinstance(config_id, (str, type(None))):
+            raise ValueError("base_url、api_key 和 config_id 必须是字符串")
+        url = urlsplit(base_url.strip())
+        if url.scheme not in {"http", "https"} or not url.netloc:
+            raise ValueError("请先填写有效的 Base URL")
+        if not api_key.strip() and payload.get("config_id"):
+            api_key = testing_store.config(payload["config_id"], include_key=True)["api_key"]
+        if not api_key.strip():
+            raise ValueError("请先填写 API Key")
+    except LookupError as error:
+        return jsonify({"error": str(error)}), 404
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    try:
+        return jsonify({"models": list_models(base_url.strip(), api_key.strip())})
+    except RuntimeError as error:
+        return jsonify({"error": str(error).replace(api_key.strip(), "[已隐藏]")}), 502
+
+
 @app.post("/api/test/runs")
 def start_test_run():
+    """手动测试配置中的一个模型；多个模型由页面逐个发起，每个模型一条测试记录。"""
     try:
-        configuration = load_test_config(request.get_json())
+        payload = request.get_json()
+        configuration = load_test_config(payload)
+        if payload.get("api_model") not in configuration["api_models"]:
+            raise ValueError("请选择配置中的模型")
+        configuration["api_model"] = payload["api_model"]
     except LookupError as error:
         return jsonify({"error": str(error)}), 404
     except (ValueError, TypeError) as error:
@@ -380,13 +440,12 @@ def scheduled_test():
         payload = request.get_json() or {}
         if not isinstance(payload, dict):
             raise ValueError("请求内容必须是 JSON 对象")
-        configuration = load_test_config(payload) if payload.get("config_id") else test_configuration(payload)
+        configuration = load_test_config(payload)
         interval = float(payload.get("interval_minutes", configuration.get("interval_minutes", 60)))
         if not math.isfinite(interval) or not 1 <= interval <= 1440:
             raise ValueError("测试间隔必须在 1 到 1440 分钟之间")
         with schedule_config_lock:
-            if configuration.get("id"):
-                testing_store.config(configuration["id"])  # 加锁后复查，配置已删除则返回 404
+            testing_store.config(configuration["id"])  # 加锁后复查，配置已删除则返回 404
             return jsonify(test_schedule.start(configuration, interval * 60)), 201
     except (TypeError, ValueError) as error:
         return jsonify({"error": str(error)}), 400
