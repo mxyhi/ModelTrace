@@ -30,14 +30,3 @@ export async function readTestEvents(response, onEvent) {
     reader.releaseLock();
   }
 }
-
-export async function readProbeResponse(response, stream, onDelta) {
-  if (!stream) {
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "接口请求失败");
-    return payload;
-  }
-  return readTestEvents(response, (packet) => {
-    if (packet.type === "delta") onDelta(packet.text);
-  });
-}

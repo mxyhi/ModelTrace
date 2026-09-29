@@ -6,6 +6,7 @@
   <title>ModelTrace</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='repository-link.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='api-monitor.css') }}">
 </head>
 <body>
   <header class="topbar">
@@ -23,6 +24,7 @@
       <nav aria-label="工作区">
         <button class="nav-button active" data-workspace="test" type="button"><span class="nav-icon">01</span><span><strong>模型测试</strong></span></button>
         <button class="nav-button" data-workspace="library" type="button"><span class="nav-icon">02</span><span><strong>指纹库管理</strong></span></button>
+        <button class="nav-button" data-workspace="api" type="button"><span class="nav-icon">03</span><span><strong>API 监测</strong></span></button>
       </nav>
     </aside>
 
@@ -42,64 +44,20 @@
         </section>
 
         <section id="test-api" class="mode-panel">
-          <div class="api-workspace-header"><div><h2>API 测试工作区</h2><p id="api-key-storage">正在读取本机配置…</p></div><span class="privacy-badge">本地服务</span></div>
-          <div id="api-workspace-message" class="message" role="status" hidden></div>
-          <div class="api-workspace-grid">
-            <aside class="api-config-panel" aria-labelledby="api-config-heading">
-              <div class="api-panel-heading"><div><h3 id="api-config-heading">API 配置</h3><span id="api-config-count">正在读取…</span></div><button id="api-new-config" class="button secondary small" type="button">新建配置</button></div>
-              <div id="api-config-list" class="api-config-list" role="group" aria-label="已保存的 API 配置"></div>
-              <p id="api-config-empty" class="api-empty" hidden>还没有配置。点击「新建配置」保存你的第一个接口。</p>
-            </aside>
-            <div class="api-run-panel">
-              <section class="api-selected-card" aria-labelledby="api-selected-name">
-                <div class="api-panel-heading"><div><span class="api-eyebrow">当前配置</span><h3 id="api-selected-name">先创建一组 API 配置</h3></div><div class="api-inline-actions"><button id="api-edit-config" class="button secondary small" type="button" disabled>编辑</button><button id="api-delete-config" class="button secondary small danger-text" type="button" disabled>删除</button></div></div>
-                <p id="api-selected-meta" class="api-muted">保存接口与模型，之后可直接复用。</p>
-                <p id="api-selected-url" class="api-endpoint"></p>
-                <div class="api-run-actions"><button id="api-run" class="button primary" type="button" disabled>立即测试</button><span class="api-muted">目标 3 份有效回答，最多尝试 6 个挑战</span></div>
-              </section>
-              <section class="api-schedule-card" aria-labelledby="api-schedule-heading">
-                <div class="api-panel-heading"><h3 id="api-schedule-heading">定时自动测试</h3><span id="api-schedule-status" class="api-status" role="status">正在读取…</span></div>
-                <p id="api-schedule-meta" class="api-muted"></p>
-                <div class="api-inline-actions"><button id="api-schedule-start" class="button secondary" type="button" disabled>开启定时</button><button id="api-schedule-stop" class="button secondary" type="button" disabled>停止定时</button></div>
-                <p class="api-help">关闭页面后继续运行，服务重启后需重新开启。一次运行一个定时任务；编辑配置后，停止再开启才会生效。</p>
-              </section>
-              <section id="api-test-progress" class="progress-panel" hidden aria-label="当前测试进度">
-                <div class="progress-heading" role="status"><strong id="api-progress-status">准备测试</strong><span id="api-progress-count">有效 0/3 · 已尝试 0/6</span></div>
-                <div class="progress-track"><i id="api-progress-fill"></i></div>
-                <div id="api-progress-steps" class="progress-steps"></div>
-                <ul id="api-test-errors" class="test-errors"></ul>
-                <div id="api-stream-output" class="stream-output" hidden><strong id="api-stream-title">当前挑战输出</strong><pre id="api-stream-text" aria-label="当前挑战输出" tabindex="0"></pre></div>
-              </section>
+          <form id="api-test-form" class="form-panel">
+            <div class="form-grid two">
+              <label><span>Base URL</span><input id="test-api-base" required placeholder="https://example.com/v1"></label>
+              <label><span>接口模型名</span><input id="test-api-model" required placeholder="模型名"></label>
+              <label><span>API Key</span><input id="test-api-key" type="password" required autocomplete="off"></label>
+              <label><span>温度（可选）</span><input id="test-temperature" type="number" min="0" max="2" step="0.1" placeholder="接口默认"></label>
             </div>
-          <section class="api-history-panel" aria-labelledby="api-history-heading">
-            <div class="api-panel-heading"><div><h3 id="api-history-heading">测试历史</h3><p class="api-muted">手动与定时测试统一记录，删除配置仍保留历史。</p></div><div class="api-inline-actions"><label class="api-filter"><span>筛选配置</span><select id="api-history-filter"><option value="">全部配置</option></select></label><button id="api-history-refresh" class="button secondary small" type="button">刷新</button></div></div>
-            <p id="api-history-error" class="api-error" role="alert"></p>
-            <p id="api-history-empty" class="api-empty">正在读取测试历史…</p>
-            <div id="api-history-table" class="table-wrap" role="region" aria-label="测试历史列表，可横向滚动" tabindex="0" hidden><table><thead><tr><th>开始时间</th><th>配置 / 模型</th><th>来源</th><th>状态</th><th>归因结果 / 原因</th><th>操作</th></tr></thead><tbody id="api-history-body"></tbody></table></div>
-            <div class="api-pagination"><span id="api-history-page">共 0 条</span><div class="api-inline-actions"><button id="api-history-prev" class="button secondary small" type="button" disabled>上一页</button><button id="api-history-next" class="button secondary small" type="button" disabled>下一页</button></div></div>
+            <div class="form-footer"><button class="button primary" type="submit">开始测试</button></div>
+          </form>
+          <section id="api-test-progress" class="progress-panel" hidden aria-live="polite">
+            <div class="progress-heading"><strong id="api-progress-status">准备测试</strong><span id="api-progress-count">有效 0/3 · 已尝试 0/6</span></div>
+            <div class="progress-track"><i id="api-progress-fill"></i></div>
+            <div id="api-progress-steps" class="progress-steps"></div>
           </section>
-          </div>
-          <section id="api-run-detail" class="api-detail-panel" hidden aria-labelledby="api-detail-title">
-            <div class="api-panel-heading"><h3 id="api-detail-title">测试详情</h3><button id="api-detail-close" class="button secondary small" type="button">收起详情</button></div>
-            <p id="api-detail-summary" class="api-muted"></p><div id="api-detail-result" class="api-detail-result"></div>
-          </section>
-          <dialog id="api-config-dialog" class="api-config-dialog" aria-labelledby="api-config-title">
-            <form id="api-config-form">
-              <div class="api-panel-heading"><h2 id="api-config-title">新建 API 配置</h2></div>
-              <p class="api-muted">保存后可复用；密钥留空可保留编辑前的值。</p>
-              <div class="form-grid two">
-                <label class="api-field-wide"><span>配置名称</span><input id="config-name" required maxlength="100" placeholder="例如：日常模型测试"></label>
-                <label class="api-field-wide"><span>Base URL</span><input id="config-base" type="url" required placeholder="https://example.com/v1"></label>
-                <label><span>接口模型名</span><input id="config-model" required placeholder="实际请求使用的模型名"></label>
-                <label><span>API Key</span><input id="config-key" type="password" autocomplete="off" required></label>
-                <label><span>温度（可选）</span><input id="config-temperature" type="number" min="0" max="2" step="any" placeholder="接口默认"></label>
-                <label><span>每轮结束后间隔（分钟）</span><input id="config-interval" type="number" min="1" max="1440" step="any" value="60" required></label>
-              </div>
-              <label class="checkbox-label api-stream-switch"><input id="config-stream" type="checkbox" checked><span>流式输出 · 逐段查看当前挑战回答</span></label>
-              <p id="api-config-error" class="api-error" role="alert"></p>
-              <div class="api-dialog-actions"><button id="api-config-cancel" class="button secondary" type="button">取消</button><button id="api-config-save" class="button primary" type="submit">保存配置</button></div>
-            </form>
-          </dialog>
         </section>
 
         <div id="test-message" class="message" hidden></div>
@@ -139,6 +97,87 @@
         </form>
 
         <div id="enrollment-message" class="message" hidden></div>
+      </section>
+
+      <section id="workspace-api" class="workspace">
+        <div id="monitor-list-view">
+          <div class="page-header">
+            <h1>API 监测</h1>
+            <button id="monitor-new" class="button primary" type="button">新建配置</button>
+          </div>
+          <div id="monitor-list-message" class="message" role="status" hidden></div>
+          <p id="monitor-loading" class="monitor-loading">正在读取配置…</p>
+          <div id="monitor-grid" class="monitor-grid" hidden></div>
+          <section id="monitor-empty" class="monitor-empty" hidden>
+            <strong>还没有 API 配置</strong>
+            <p>保存接口地址、API Key 和模型后，可以随时测试，也可以按间隔定时测试。</p>
+            <button id="monitor-empty-new" class="button primary" type="button">新建配置</button>
+          </section>
+        </div>
+
+        <div id="monitor-detail-view" hidden>
+          <nav class="monitor-breadcrumb" aria-label="当前位置"><button id="monitor-back" type="button">API 监测</button><span aria-hidden="true">/</span><span id="monitor-crumb"></span></nav>
+          <div class="page-header">
+            <div class="monitor-title"><h1 id="monitor-name" tabindex="-1"></h1><p id="monitor-url"></p></div>
+            <div class="monitor-header-actions"><button id="monitor-edit" class="button secondary" type="button">编辑</button><button id="monitor-delete" class="button secondary danger" type="button">删除</button></div>
+          </div>
+          <div id="monitor-detail-message" class="message" role="status" hidden></div>
+          <div class="monitor-facts">
+            <div><span>接口模型</span><strong id="monitor-model"></strong></div>
+            <div><span>输出方式</span><strong id="monitor-stream"></strong></div>
+            <div><span>温度</span><strong id="monitor-temperature"></strong></div>
+            <div><span>定时间隔</span><strong id="monitor-interval"></strong></div>
+          </div>
+          <section class="monitor-actions" aria-label="测试操作">
+            <div class="monitor-action-row">
+              <div><strong>立即测试</strong><span>目标 3 份有效回答，最多尝试 6 个挑战</span></div>
+              <button id="monitor-run" class="button primary" type="button">立即测试</button>
+            </div>
+            <div class="monitor-action-row">
+              <div><strong>定时测试 <span id="monitor-schedule-state" class="monitor-pill">读取中</span></strong><span id="monitor-schedule-meta"></span></div>
+              <button id="monitor-schedule-toggle" class="button secondary" type="button" disabled>开启定时</button>
+            </div>
+          </section>
+          <section id="monitor-progress" class="progress-panel" hidden aria-label="当前测试进度">
+            <div class="progress-heading" role="status"><strong id="monitor-progress-status">准备测试</strong><span id="monitor-progress-count">有效 0/3 · 已尝试 0/6</span></div>
+            <div class="progress-track"><i id="monitor-progress-fill"></i></div>
+            <div id="monitor-progress-steps" class="progress-steps"></div>
+            <ul id="monitor-test-errors" class="test-errors"></ul>
+            <div id="monitor-stream-output" class="stream-output" hidden><strong id="monitor-stream-title">当前挑战输出</strong><pre id="monitor-stream-text" tabindex="0" aria-label="当前挑战输出"></pre></div>
+          </section>
+          <section id="monitor-run-result" class="result-panel" hidden aria-live="polite"></section>
+          <section id="monitor-records" class="monitor-records" aria-labelledby="monitor-records-heading">
+            <div class="panel-toolbar"><div><strong id="monitor-records-heading">测试记录</strong><span id="monitor-records-count"></span></div><button id="monitor-records-refresh" class="button secondary" type="button">刷新</button></div>
+            <div class="monitor-records-body">
+              <p id="monitor-records-empty" class="monitor-records-empty">正在读取测试记录…</p>
+              <div id="monitor-records-table" class="table-wrap" role="region" aria-label="测试记录，可横向滚动" tabindex="0" hidden><table><thead><tr><th>开始时间</th><th>来源</th><th>状态</th><th>归因结果 / 原因</th><th>耗时</th><th><span class="visually-hidden">操作</span></th></tr></thead><tbody id="monitor-records-rows"></tbody></table></div>
+            </div>
+            <div id="monitor-pager" class="monitor-pager" hidden><span id="monitor-page"></span><div><button id="monitor-prev" class="button secondary" type="button">上一页</button><button id="monitor-next" class="button secondary" type="button">下一页</button></div></div>
+          </section>
+        </div>
+
+        <dialog id="monitor-config-dialog" class="monitor-dialog" aria-labelledby="monitor-config-title">
+          <form id="monitor-config-form">
+            <div class="monitor-dialog-head"><h2 id="monitor-config-title">新建配置</h2><button class="monitor-close" type="button" data-close-dialog aria-label="关闭">×</button></div>
+            <div class="form-grid two">
+              <label class="monitor-field-wide"><span>配置名称</span><input id="config-name" required maxlength="100" placeholder="例如：主力接口"></label>
+              <label class="monitor-field-wide"><span>Base URL</span><input id="config-base" type="url" required placeholder="https://example.com/v1"></label>
+              <label><span>接口模型名</span><input id="config-model" required placeholder="实际请求使用的模型名"></label>
+              <label><span>API Key</span><input id="config-key" type="password" autocomplete="off" required></label>
+              <label><span>温度（可选）</span><input id="config-temperature" type="number" min="0" max="2" step="any" placeholder="接口默认"></label>
+              <label><span>定时间隔（分钟）</span><input id="config-interval" type="number" min="1" max="1440" step="any" value="60" required></label>
+              <label class="monitor-field-wide checkbox-label"><input id="config-stream" type="checkbox" checked><span>流式输出<small>逐段显示当前挑战的回答；接口不支持流式时关闭</small></span></label>
+            </div>
+            <p id="monitor-config-error" class="monitor-dialog-error" role="alert"></p>
+            <div class="form-footer"><button class="button secondary" type="button" data-close-dialog>取消</button><button id="monitor-config-save" class="button primary" type="submit">保存配置</button></div>
+          </form>
+        </dialog>
+
+        <dialog id="monitor-record-dialog" class="monitor-dialog wide" aria-labelledby="monitor-record-title">
+          <div class="monitor-dialog-head"><h2 id="monitor-record-title">测试详情</h2><button class="monitor-close" type="button" data-close-dialog aria-label="关闭">×</button></div>
+          <p id="monitor-record-meta" class="monitor-record-meta"></p>
+          <div id="monitor-record-body" class="monitor-record-body"></div>
+        </dialog>
       </section>
     </main>
   </div>

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import secrets
 from pathlib import Path
 from contextlib import closing
-from threading import Event
+from threading import Event, Lock
 from urllib.parse import urlsplit
 
 from flask import Flask, Response, jsonify, render_template, request
@@ -24,7 +25,8 @@ PROJECT = Path(__file__).resolve().parent
 CUSTOM_BANKS_FILE = PROJECT / "data" / "custom_banks.json"
 UNIFIED_BANK_FILE = PROJECT / "data" / "unified_bank.json"
 DEFAULT_BANK_ID = "claude"
-testing_store = TestingStore(PROJECT / "data" / "local" / "testing.sqlite3")
+# 测试和临时验证用 MODELTRACE_TESTING_DB 指向独立库；启动时会把本库中未完成的记录标为中断。
+testing_store = TestingStore(Path(os.environ.get("MODELTRACE_TESTING_DB") or PROJECT / "data" / "local" / "testing.sqlite3"))
 
 
 def builtin_configs() -> dict[str, dict]:
@@ -154,6 +156,8 @@ def run_scheduled_test(configuration: dict, cancel: Event) -> dict:
 
 
 test_schedule = TestScheduler(run_scheduled_test)
+# 开启定时与删除配置互斥，避免定时任务落在刚删除的配置上。
+schedule_config_lock = Lock()
 
 
 def load_test_config(payload: dict) -> dict:
@@ -199,11 +203,13 @@ def test_configs():
 def test_config_detail(config_id: str):
     try:
         if request.method == "DELETE":
-            status = test_schedule.status()
-            if status["state"] != "stopped" and status["config_id"] == config_id:
-                return jsonify({"error": "请先停止使用此配置的定时任务"}), 409
-            testing_store.delete_config(config_id)
-            return jsonify({"deleted": True})
+            with schedule_config_lock:
+                status = test_schedule.status()
+                if status["state"] != "stopped" and status["config_id"] == config_id:
+                    return jsonify({"error": "请先停止使用此配置的定时任务"}), 409
+                deleted_runs = testing_store.delete_config(config_id)
+            app.logger.info("test_config_deleted config_id=%s deleted_runs=%s", config_id, deleted_runs)
+            return jsonify({"deleted": True, "deleted_runs": deleted_runs})
         values = saved_config_values(request.get_json(), config_id)
         return jsonify({"config": testing_store.save_config(values, config_id)})
     except LookupError as error:
@@ -378,7 +384,10 @@ def scheduled_test():
         interval = float(payload.get("interval_minutes", configuration.get("interval_minutes", 60)))
         if not math.isfinite(interval) or not 1 <= interval <= 1440:
             raise ValueError("测试间隔必须在 1 到 1440 分钟之间")
-        return jsonify(test_schedule.start(configuration, interval * 60)), 201
+        with schedule_config_lock:
+            if configuration.get("id"):
+                testing_store.config(configuration["id"])  # 加锁后复查，配置已删除则返回 404
+            return jsonify(test_schedule.start(configuration, interval * 60)), 201
     except (TypeError, ValueError) as error:
         return jsonify({"error": str(error)}), 400
     except LookupError as error:

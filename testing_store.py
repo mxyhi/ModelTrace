@@ -57,8 +57,22 @@ class TestingStore:
         return value
 
     def configs(self) -> list[dict]:
+        """配置列表附带记录数和最近一次测试，供 API 监测卡片直接展示。"""
         with self.connection() as db:
-            return [self.public_config(row) for row in db.execute("SELECT * FROM api_configs ORDER BY created_at, id")]
+            rows = db.execute("""SELECT c.*, (SELECT count(*) FROM test_runs WHERE config_id=c.id) AS run_count,
+                r.status AS last_status, r.started_at AS last_started_at, r.prediction AS last_prediction,
+                r.probability AS last_probability, r.error AS last_error
+                FROM api_configs c LEFT JOIN test_runs r ON r.id=(
+                    SELECT id FROM test_runs WHERE config_id=c.id ORDER BY started_at DESC, id DESC LIMIT 1)
+                ORDER BY c.created_at, c.id""").fetchall()
+        configs = []
+        for row in rows:
+            value = dict(row)
+            last = {key.removeprefix("last_"): value.pop(key) for key in list(value) if key.startswith("last_")}
+            value = self.public_config(value)
+            value["last_run"] = last if last["status"] else None
+            configs.append(value)
+        return configs
 
     def config(self, config_id: str, *, include_key: bool = False) -> dict:
         with self.connection() as db:
@@ -92,11 +106,13 @@ class TestingStore:
                     raise LookupError("API 配置不存在")
         return self.config(config_id)
 
-    def delete_config(self, config_id: str) -> None:
+    def delete_config(self, config_id: str) -> int:
+        """删除配置及其测试记录，返回删除的记录数。"""
         with self.connection() as db:
             if not db.execute("DELETE FROM api_configs WHERE id=?", (config_id,)).rowcount:
                 raise LookupError("API 配置不存在")
-        # 历史保留配置快照，不随配置删除而丢失。
+            # 测试记录只在所属配置的详情页展示，随配置一起删除，避免留下无法访问的记录。
+            return db.execute("DELETE FROM test_runs WHERE config_id=?", (config_id,)).rowcount
 
     def start_run(self, configuration: dict, source: str) -> str:
         run_id = secrets.token_hex(12)

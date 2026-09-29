@@ -1,4 +1,4 @@
-import { bindApiWorkspace } from "./api-workspace.js";
+import { bindApiMonitor } from "./api-monitor.js";
 
 const state = {
   challenges: [],
@@ -99,7 +99,6 @@ function renderResult(payload, target = byId("result")) {
     <div class="diagnostics">${diagnostics}</div>
     <div class="table-wrap"><table><thead><tr><th>排序</th><th>候选模型</th><th>家族</th><th>归因概率</th><th>分布相似度</th></tr></thead><tbody>${rows}</tbody></table></div>
     ${apiNote ? `<div class="result-note">${apiNote}</div>` : ""}
-    ${payload.api_test?.errors.length ? `<ul class="test-errors">${payload.api_test.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul>` : ""}
     <div class="result-guidance" role="note" aria-label="结果说明">
       <p>本工具仅对指纹库内的模型进行归因；若待测模型不在指纹库中，得到任何结果都有可能。</p>
       <p>Claude Code 的系统提示词会影响模型偏好，测试结果存在较大偏差，建议不要在 Claude Code 中测试。</p>
@@ -125,6 +124,101 @@ async function analyzeManual() {
   } else {
     setMessage(byId("test-message"), payload.error || "无法完成归因。", "error");
     byId("result").hidden = true;
+  }
+  button.disabled = false;
+}
+
+function renderApiProgress(states, status) {
+  const valid = states.filter((state) => state === "done").length;
+  const attempted = states.filter((state) => ["done", "invalid", "error"].includes(state)).length;
+  const target = 3;
+  byId("api-test-progress").hidden = false;
+  byId("api-progress-status").textContent = status;
+  byId("api-progress-count").textContent = `有效 ${valid}/${target} · 已尝试 ${attempted}/${states.length}`;
+  byId("api-progress-fill").style.width = `${(valid / target) * 100}%`;
+  byId("api-progress-steps").innerHTML = states.map((state, index) => {
+    const labels = { pending: "等待", working: "请求中", done: "有效", invalid: "数字不足", error: "接口失败", skipped: "无需调用" };
+    return `<span class="progress-step ${state}"><b>${index + 1}</b>挑战 ${index + 1} · ${labels[state]}</span>`;
+  }).join("");
+}
+
+async function testViaApi(event) {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector("button[type=submit]");
+  button.disabled = true;
+  byId("result").hidden = true;
+  setMessage(byId("test-message"), "");
+
+  const challengeResponse = await fetch("/api/challenges");
+  const firstBatch = (await challengeResponse.json()).challenges;
+  const retryResponse = await fetch("/api/challenges");
+  const challenges = firstBatch.concat((await retryResponse.json()).challenges);
+  const states = challenges.map(() => "pending");
+  const outputs = [];
+  const errors = [];
+  const target = 3;
+  const configuration = {
+    base_url: byId("test-api-base").value,
+    api_key: byId("test-api-key").value,
+    api_model: byId("test-api-model").value,
+    temperature: optionalNumber("test-temperature"),
+  };
+  renderApiProgress(states, "已生成独立挑战，准备调用模型");
+
+  for (let index = 0; index < challenges.length && outputs.length < target; index += 1) {
+    states[index] = "working";
+    renderApiProgress(states, `正在进行第 ${index + 1} 次尝试，等待模型完整输出……`);
+    try {
+      const response = await fetch("/api/test/probe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...configuration,
+          prompt: challenges[index].prompt,
+          expected_count: challenges[index].expected_count,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "接口请求失败");
+      if (payload.accepted) {
+        outputs.push({ text: payload.text, expected_count: challenges[index].expected_count });
+        states[index] = "done";
+      } else {
+        errors.push(`尝试 ${index + 1}: 有效数字 ${payload.parsed_numbers}/${payload.minimum_numbers}`);
+        states[index] = "invalid";
+      }
+    } catch (error) {
+      errors.push(`尝试 ${index + 1}: ${error.message}`);
+      states[index] = "error";
+    }
+    renderApiProgress(states, `当前已有 ${outputs.length}/${target} 份有效回答`);
+  }
+
+  if (outputs.length === target) {
+    states.forEach((state, index) => { if (state === "pending") states[index] = "skipped"; });
+  }
+
+  if (!outputs.length) {
+    renderApiProgress(states, "六次尝试后仍没有可用回答");
+    setMessage(byId("test-message"), `没有获得可分析输出。${errors[0] || ""}`, "error");
+    button.disabled = false;
+    return;
+  }
+
+  renderApiProgress(states, "模型回答已收齐，正在计算归因概率……");
+  const analysisResponse = await fetch("/api/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ outputs }),
+  });
+  const result = await analysisResponse.json();
+  if (analysisResponse.ok) {
+    const attempted = states.filter((state) => ["done", "invalid", "error"].includes(state)).length;
+    result.api_test = { requested: target, attempted, max_attempts: challenges.length, received: outputs.length, errors };
+    renderApiProgress(states, `测试完成：${outputs.length}/${target} 份有效回答进入归因`);
+    renderResult(result);
+  } else {
+    setMessage(byId("test-message"), result.error || "API 自动测试失败。", "error");
   }
   button.disabled = false;
 }
@@ -237,10 +331,11 @@ document.querySelectorAll("[data-test-mode]").forEach((button) => button.addEven
 byId("bank-select").addEventListener("change", (event) => selectBank(event.target.value));
 byId("regenerate").addEventListener("click", loadChallenges);
 byId("analyze").addEventListener("click", analyzeManual);
+byId("api-test-form").addEventListener("submit", testViaApi);
 byId("auto-enrollment").addEventListener("submit", enrollAutomatically);
 byId("show-create-bank").addEventListener("click", () => { byId("create-bank-form").hidden = !byId("create-bank-form").hidden; });
 byId("create-bank-form").addEventListener("submit", createBank);
 
 renderInventory();
 loadChallenges();
-bindApiWorkspace(renderResult);
+bindApiMonitor(renderResult);

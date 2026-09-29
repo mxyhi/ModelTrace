@@ -1,0 +1,119 @@
+/* API 监测：配置卡片列表与配置详情页，复用 styles.css 的变量与组件。styles.css 与上游保持一致，fork 样式只放这里。 */
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#workspace-api button:focus-visible, #workspace-api [tabindex]:focus-visible, .monitor-dialog button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.button.secondary.danger { color: var(--danger); }
+.button.secondary.danger:hover { background: var(--danger-soft); border-color: #f3c7c2; }
+#monitor-list-message, #monitor-detail-message { margin: 0 0 14px; }
+
+.monitor-pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; color: var(--muted); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 999px; font-size: 11px; font-weight: 650; line-height: 1.4; white-space: nowrap; }
+.monitor-pill[data-tone="success"] { color: var(--success); background: var(--success-soft); border-color: #c8ead7; }
+.monitor-pill[data-tone="error"] { color: var(--danger); background: var(--danger-soft); border-color: #f3c7c2; }
+.monitor-pill[data-tone="running"] { color: var(--primary-dark); background: var(--primary-soft); border-color: #bcd2ff; }
+.monitor-pill[data-tone="running"]::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.monitor-pill[data-tone="cancelled"] { color: var(--warning); background: var(--warning-soft); border-color: #eedca6; }
+
+/* 列表页 */
+.monitor-loading { margin: 0; padding: 40px 16px; color: var(--muted); text-align: center; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
+.monitor-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.monitor-grid[hidden], .monitor-empty[hidden], .monitor-pager[hidden] { display: none; }
+.monitor-card { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 16px 17px 14px; color: var(--text); text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; transition: border-color .15s ease, box-shadow .15s ease; }
+.monitor-card:hover { border-color: #bcd2ff; box-shadow: 0 4px 14px rgba(16, 24, 40, .06); }
+.monitor-card > span { min-width: 0; }
+.monitor-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.monitor-card-head strong { min-width: 0; overflow: hidden; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-card-model { color: #344054; font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
+.monitor-card-url { overflow: hidden; color: var(--muted); font: 11px/1.5 Consolas, ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-card-foot { display: grid; gap: 7px; margin-top: 8px; padding-top: 11px; border-top: 1px solid var(--line); }
+.monitor-card-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; color: var(--muted); font-size: 11px; }
+.monitor-card-line .monitor-pill { flex: 0 0 auto; }
+.monitor-card-outcome { min-width: 0; overflow: hidden; color: var(--text); font-size: 12px; font-weight: 650; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 52px 24px; text-align: center; background: var(--surface); border: 1px dashed var(--line-strong); border-radius: 9px; }
+.monitor-empty strong { font-size: 15px; }
+.monitor-empty p { max-width: 420px; margin: 0 0 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+/* 详情页 */
+.monitor-breadcrumb { display: flex; align-items: center; gap: 8px; min-width: 0; margin: -8px 0 14px; color: var(--muted); font-size: 12px; }
+.monitor-breadcrumb button { flex: 0 0 auto; padding: 0; color: var(--primary); border: 0; background: none; font-weight: 650; }
+.monitor-breadcrumb button:hover { text-decoration: underline; }
+#monitor-crumb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-title { min-width: 0; }
+.monitor-title h1 { overflow-wrap: anywhere; }
+.monitor-title h1:focus { outline: none; }
+.monitor-title p { font: 12px/1.5 Consolas, ui-monospace, monospace; overflow-wrap: anywhere; }
+.monitor-header-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+.monitor-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
+.monitor-facts > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; padding: 14px 17px; }
+.monitor-facts > div + div { border-left: 1px solid var(--line); }
+.monitor-facts span { color: var(--muted); font-size: 11px; }
+.monitor-facts strong { font-size: 14px; overflow-wrap: anywhere; }
+.monitor-actions { margin-top: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
+.monitor-action-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 15px 17px; }
+.monitor-action-row + .monitor-action-row { border-top: 1px solid var(--line); }
+.monitor-action-row > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.monitor-action-row > div > strong { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.monitor-action-row > div > span { color: var(--muted); font-size: 12px; line-height: 1.55; }
+.monitor-action-row > .button { flex: 0 0 auto; min-width: 96px; }
+#monitor-progress .progress-heading { flex-wrap: wrap; gap: 6px 16px; }
+.stream-output { margin-top: 14px; }
+.stream-output strong { display: block; margin-bottom: 8px; font-size: 12px; }
+.stream-output pre { min-height: 120px; max-height: 240px; }
+.test-errors { margin: 12px 0 0; padding-left: 18px; color: var(--danger); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.test-errors:empty { display: none; }
+
+.monitor-records { margin-top: 18px; }
+.monitor-records-body { overflow: hidden; background: var(--surface); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 9px 9px; }
+.monitor-records[data-paged="true"] .monitor-records-body { border-radius: 0; }
+.monitor-records-empty { margin: 0; padding: 36px 16px; color: var(--muted); font-size: 12px; line-height: 1.6; text-align: center; }
+/* 让表头里绝对定位的隐藏文字留在横向滚动容器内，窄屏不撑宽页面。 */
+.monitor-records .table-wrap { position: relative; }
+.monitor-records td { vertical-align: middle; }
+.monitor-records td small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+.monitor-records td.monitor-result-cell { min-width: 220px; max-width: 460px; white-space: normal; overflow-wrap: anywhere; }
+.monitor-records td:last-child { text-align: right; }
+.monitor-link { padding: 4px 2px; color: var(--primary); border: 0; background: none; font-size: 12px; font-weight: 650; }
+.monitor-link:hover { text-decoration: underline; }
+.monitor-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 9px 9px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.monitor-pager > div { display: flex; gap: 8px; }
+.monitor-pager .button { min-height: 30px; padding: 5px 11px; }
+
+/* 对话框 */
+.monitor-dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); padding: 0; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 24px 64px rgba(16, 24, 40, .18); }
+.monitor-dialog.wide { width: min(980px, calc(100vw - 32px)); }
+.monitor-dialog::backdrop { background: rgba(24, 33, 47, .42); }
+.monitor-dialog-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px 14px 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.monitor-dialog-head h2 { margin: 0; font-size: 16px; }
+.monitor-close { width: 32px; height: 32px; color: var(--muted); border: 0; border-radius: 6px; background: transparent; font-size: 20px; line-height: 1; }
+.monitor-close:hover { color: var(--text); background: var(--surface-soft); }
+.monitor-dialog .form-grid { padding: 18px 20px; }
+.monitor-dialog .form-footer { gap: 8px; padding: 14px 20px; }
+.monitor-field-wide { grid-column: 1 / -1; }
+.monitor-dialog .checkbox-label { flex-direction: row; align-items: flex-start; gap: 10px; padding: 12px; color: var(--text); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
+.monitor-dialog .checkbox-label input { flex: 0 0 auto; width: 16px; height: 16px; margin: 1px 0 0; padding: 0; accent-color: var(--primary); }
+.monitor-dialog .checkbox-label input:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.monitor-dialog .checkbox-label span { display: flex; flex-direction: column; gap: 3px; }
+.monitor-dialog-error { margin: 0 20px 14px; color: var(--danger); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.monitor-dialog-error:empty { display: none; }
+.monitor-record-meta { margin: 0; padding: 12px 20px; color: var(--muted); background: var(--surface-soft); border-bottom: 1px solid var(--line); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.monitor-record-body { padding: 16px 20px 20px; }
+.monitor-record-body .result-panel { margin-top: 0; }
+.monitor-record-body .message { margin-top: 0; }
+
+@media (max-width: 900px) {
+  .monitor-facts { grid-template-columns: 1fr 1fr; }
+  .monitor-facts > div:nth-child(3) { border-left: 0; }
+  .monitor-facts > div:nth-child(n + 3) { border-top: 1px solid var(--line); }
+}
+
+@media (max-width: 640px) {
+  .sidebar nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .sidebar .nav-button { gap: 7px; padding: 8px; }
+  .monitor-grid { grid-template-columns: minmax(0, 1fr); }
+  .monitor-header-actions { width: 100%; }
+  .monitor-action-row { align-items: stretch; flex-direction: column; gap: 12px; }
+  .monitor-pager { flex-wrap: wrap; }
+  .monitor-pager .button { width: auto; }
+  .monitor-dialog { width: 100%; max-width: 100%; height: 100dvh; max-height: 100dvh; margin: 0; border: 0; border-radius: 0; }
+  .monitor-dialog.wide { width: 100%; }
+  .monitor-dialog .form-footer { flex-direction: row; justify-content: flex-end; }
+  .monitor-dialog .form-footer .button { width: auto; }
+}

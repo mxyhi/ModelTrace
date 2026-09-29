@@ -1,13 +1,18 @@
 import io
 import json
+import os
+import tempfile
 import time
 import unittest
 import urllib.error
 from concurrent.futures import CancelledError
+from pathlib import Path
 from threading import Event
 from unittest.mock import patch
 
-import app as web
+# 导入 app 前指向临时库，避免改写本机正在运行的测试记录。
+os.environ["MODELTRACE_TESTING_DB"] = str(Path(tempfile.mkdtemp(prefix="modeltrace-tests-")) / "testing.sqlite3")
+import app as web  # noqa: E402
 import enrollment
 from completion_stream import completion_deltas
 from test_scheduler import TestScheduler

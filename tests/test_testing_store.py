@@ -1,3 +1,4 @@
+import os
 import json
 import tempfile
 import unittest
@@ -5,7 +6,9 @@ from pathlib import Path
 from threading import Event
 from unittest.mock import patch
 
-import app as web
+# 导入 app 前指向临时库，避免改写本机正在运行的测试记录。
+os.environ["MODELTRACE_TESTING_DB"] = str(Path(tempfile.mkdtemp(prefix="modeltrace-tests-")) / "testing.sqlite3")
+import app as web  # noqa: E402
 from testing_store import TestingStore
 from test_scheduler import TestScheduler
 
@@ -97,7 +100,7 @@ class PersistedTestingTests(unittest.TestCase):
         self.assertEqual(record["source"], "scheduled")
         self.assertEqual(record["status"], "success")
 
-    def test_pagination_filter_and_delete_preserve_history(self):
+    def test_pagination_filter_and_delete_removes_config_history(self):
         first, second = self.create(), self.create(name="配置二")
         for config_id in [first["id"], second["id"], first["id"]]:
             run = self.store.start_run(self.store.config(config_id, include_key=True), "manual")
@@ -105,9 +108,28 @@ class PersistedTestingTests(unittest.TestCase):
         response = self.client.get(f"/api/test/history?config_id={first['id']}&limit=1&offset=1")
         self.assertEqual(response.json["total"], 2)
         self.assertEqual(len(response.json["items"]), 1)
-        self.assertEqual(self.client.delete(f"/api/test/configs/{first['id']}").status_code, 200)
-        self.assertEqual(self.client.get("/api/test/history").json["total"], 3)
+        deleted = self.client.delete(f"/api/test/configs/{first['id']}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json["deleted_runs"], 2)
+        history = self.client.get("/api/test/history").json
+        self.assertEqual(history["total"], 1)
+        self.assertEqual(history["items"][0]["config_id"], second["id"])
         self.assertEqual(self.client.get("/api/test/history?limit=10000").status_code, 400)
+
+    def test_config_list_includes_run_count_and_latest_run(self):
+        first, second = self.create(), self.create(name="配置二")
+        failed = self.store.start_run(self.store.config(first["id"], include_key=True), "manual")
+        self.store.finish_run(failed, "error", .1, error="测试失败")
+        succeeded = self.store.start_run(self.store.config(first["id"], include_key=True), "scheduled")
+        self.store.finish_run(succeeded, "success", .2, result={"prediction_name": "mock", "probability": .9, "used_outputs": 3})
+        configs = {config["id"]: config for config in self.client.get("/api/test/configs").json["configs"]}
+        self.assertEqual(configs[first["id"]]["run_count"], 2)
+        self.assertEqual(configs[first["id"]]["last_run"]["status"], "success")
+        self.assertEqual(configs[first["id"]]["last_run"]["prediction"], "mock")
+        self.assertEqual(configs[second["id"]]["run_count"], 0)
+        self.assertIsNone(configs[second["id"]]["last_run"])
+        self.assertNotIn(VALUES["api_key"], json.dumps(configs))
+        self.assertTrue(all("api_key" not in config for config in configs.values()))
 
     def test_restart_marks_interrupted_run_as_failed(self):
         config = self.create()
