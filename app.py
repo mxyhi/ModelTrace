@@ -5,10 +5,16 @@ import math
 import re
 import secrets
 from pathlib import Path
+from contextlib import closing
+from threading import Event
+from urllib.parse import urlsplit
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
-from enrollment import bank_summary, enroll_automatic, request_completion, test_automatic
+from enrollment import bank_summary, enroll_automatic, iter_completion, request_completion
+from test_scheduler import TestScheduler
+from testing_service import collect_recorded_test, recorded_test
+from testing_store import TestingStore
 from fingerprint import analyze_global_outputs, generate_challenges, load_bank, parse_numbers
 from bank_builder import build_bank, read_rows
 
@@ -18,6 +24,7 @@ PROJECT = Path(__file__).resolve().parent
 CUSTOM_BANKS_FILE = PROJECT / "data" / "custom_banks.json"
 UNIFIED_BANK_FILE = PROJECT / "data" / "unified_bank.json"
 DEFAULT_BANK_ID = "claude"
+testing_store = TestingStore(PROJECT / "data" / "local" / "testing.sqlite3")
 
 
 def builtin_configs() -> dict[str, dict]:
@@ -121,6 +128,127 @@ def requested_temperature(payload: dict) -> float | None:
     return None if value in (None, "") else float(value)
 
 
+def test_configuration(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("请求内容必须是 JSON 对象")
+    configuration = {}
+    for field in ("base_url", "api_key", "api_model"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"请填写 {field}")
+        configuration[field] = value.strip()
+    url = urlsplit(configuration["base_url"])
+    if url.scheme not in {"http", "https"} or not url.netloc:
+        raise ValueError("Base URL 必须是有效的 HTTP 或 HTTPS 地址")
+    stream = payload.get("stream", False)
+    if not isinstance(stream, bool):
+        raise ValueError("stream 必须为布尔值")
+    temperature = requested_temperature(payload)
+    if temperature is not None and (not math.isfinite(temperature) or not 0 <= temperature <= 2):
+        raise ValueError("温度必须在 0 到 2 之间")
+    return {**configuration, "temperature": temperature, "stream": stream, "api_format": "auto"}
+
+
+def run_scheduled_test(configuration: dict, cancel: Event) -> dict:
+    return collect_recorded_test(testing_store, configuration, "scheduled", unified_bank, summarized_unified_bank(), cancel)
+
+
+test_schedule = TestScheduler(run_scheduled_test)
+
+
+def load_test_config(payload: dict) -> dict:
+    config_id = payload.get("config_id") if isinstance(payload, dict) else None
+    if not isinstance(config_id, str) or not config_id:
+        raise ValueError("请选择已保存的 API 配置")
+    return testing_store.config(config_id, include_key=True)
+
+
+def saved_config_values(payload: dict, config_id: str | None = None) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("请求内容必须是 JSON 对象")
+    existing = testing_store.config(config_id, include_key=True) if config_id else {}
+    values = {"stream": True, "interval_minutes": 60, **existing, **payload}
+    if not values.get("api_key") and existing:
+        values["api_key"] = existing["api_key"]
+    name = values.get("name")
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
+        raise ValueError("配置名称需为 1–100 个字符")
+    interval = float(values["interval_minutes"])
+    if not math.isfinite(interval) or not 1 <= interval <= 1440:
+        raise ValueError("测试间隔必须在 1 到 1440 分钟之间")
+    configuration = test_configuration(values)
+    configuration.pop("api_format")
+    # 编辑时空密钥交给 UPDATE 原子保留，避免并发修改将旧密钥写回。
+    if config_id and not payload.get("api_key"):
+        configuration["api_key"] = ""
+    return {**configuration, "name": name.strip(), "interval_minutes": interval}
+
+
+@app.route("/api/test/configs", methods=["GET", "POST"])
+def test_configs():
+    if request.method == "GET":
+        return jsonify({"configs": testing_store.configs(), "key_storage": "local"})
+    try:
+        config = testing_store.save_config(saved_config_values(request.get_json()))
+        return jsonify({"config": config}), 201
+    except (ValueError, TypeError) as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@app.route("/api/test/configs/<config_id>", methods=["PATCH", "DELETE"])
+def test_config_detail(config_id: str):
+    try:
+        if request.method == "DELETE":
+            status = test_schedule.status()
+            if status["state"] != "stopped" and status["config_id"] == config_id:
+                return jsonify({"error": "请先停止使用此配置的定时任务"}), 409
+            testing_store.delete_config(config_id)
+            return jsonify({"deleted": True})
+        values = saved_config_values(request.get_json(), config_id)
+        return jsonify({"config": testing_store.save_config(values, config_id)})
+    except LookupError as error:
+        return jsonify({"error": str(error)}), 404
+    except (ValueError, TypeError) as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@app.post("/api/test/runs")
+def start_test_run():
+    try:
+        configuration = load_test_config(request.get_json())
+    except LookupError as error:
+        return jsonify({"error": str(error)}), 404
+    except (ValueError, TypeError) as error:
+        return jsonify({"error": str(error)}), 400
+    bank, summary = unified_bank, summarized_unified_bank()
+
+    def generate():
+        with closing(recorded_test(testing_store, configuration, "manual", bank, summary)) as events:
+            for event in events:
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+    return Response(generate(), mimetype="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/test/history")
+def test_history():
+    try:
+        limit = int(request.args.get("limit", 20))
+        offset = int(request.args.get("offset", 0))
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValueError("分页参数无效")
+        return jsonify(testing_store.history(request.args.get("config_id"), limit, offset))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@app.get("/api/test/history/<run_id>")
+def test_history_detail(run_id: str):
+    try:
+        return jsonify({"run": testing_store.run(run_id)})
+    except LookupError as error:
+        return jsonify({"error": str(error)}), 404
+
+
 def summarized_bank(bank_id: str) -> dict:
     config = BANK_CONFIGS[bank_id]
     bank = banks.get(bank_id)
@@ -187,45 +315,76 @@ def analyze():
 def automatic_test():
     payload = request.get_json()
     try:
-        result = test_automatic(
-            base_url=payload["base_url"].strip(),
-            api_key=payload["api_key"],
-            api_model=payload["api_model"].strip(),
-            temperature=requested_temperature(payload),
-            bank=unified_bank,
-            api_format="auto",
-        )
-        result["bank"] = summarized_unified_bank()
+        configuration = load_test_config(payload) if isinstance(payload, dict) and payload.get("config_id") else test_configuration(payload)
+        result = collect_recorded_test(testing_store, configuration, "manual", unified_bank, summarized_unified_bank())
         return jsonify(result)
-    except ValueError as error:
+    except (ValueError, TypeError) as error:
         return jsonify({"error": str(error)}), 400
+    except LookupError as error:
+        return jsonify({"error": str(error)}), 404
 
 
 @app.post("/api/test/probe")
 def automatic_test_probe():
-    payload = request.get_json()
+    payload = request.get_json() or {}
     try:
-        text = request_completion(
-            base_url=payload["base_url"].strip(),
-            api_key=payload["api_key"],
-            api_model=payload["api_model"].strip(),
-            prompt=payload["prompt"],
-            temperature=requested_temperature(payload),
-            api_format="auto",
-        )
+        configuration = test_configuration(payload)
+        prompt = payload["prompt"]
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("挑战内容不能为空")
         expected_count = int(payload["expected_count"])
+        if expected_count <= 0:
+            raise ValueError("预期数字数必须大于 0")
+    except (KeyError, TypeError, ValueError) as error:
+        return jsonify({"error": str(error)}), 400
+
+    def result_for(text: str) -> dict:
         parsed_numbers = len(parse_numbers(text))
         minimum_numbers = max(80, math.ceil(expected_count * 0.55))
-        return jsonify(
-            {
-                "text": text,
-                "parsed_numbers": parsed_numbers,
-                "minimum_numbers": minimum_numbers,
-                "accepted": parsed_numbers >= minimum_numbers,
-            }
-        )
+        return {"text": text, "parsed_numbers": parsed_numbers, "minimum_numbers": minimum_numbers, "accepted": parsed_numbers >= minimum_numbers}
+
+    if configuration["stream"]:
+        def generate():
+            yield json.dumps({"type": "start"}) + "\n"
+            parts = []
+            try:
+                with closing(iter_completion(**configuration, prompt=prompt)) as chunks:
+                    for text in chunks:
+                        parts.append(text)
+                        yield json.dumps({"type": "delta", "text": text}, ensure_ascii=False) + "\n"
+                yield json.dumps({"type": "result", **result_for("".join(parts))}, ensure_ascii=False) + "\n"
+            except Exception as error:
+                app.logger.warning("probe_failed stream=true error_type=%s", type(error).__name__)
+                message = str(error).replace(configuration["api_key"], "[已隐藏]")
+                yield json.dumps({"type": "error", "error": message}, ensure_ascii=False) + "\n"
+        return Response(generate(), mimetype="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+    try:
+        return jsonify(result_for(request_completion(**configuration, prompt=prompt)))
     except Exception as error:
-        return jsonify({"error": str(error)}), 502
+        return jsonify({"error": str(error).replace(configuration["api_key"], "[已隐藏]")}), 502
+
+
+@app.route("/api/test/schedule", methods=["GET", "POST", "DELETE"])
+def scheduled_test():
+    if request.method == "GET":
+        return jsonify(test_schedule.status())
+    if request.method == "DELETE":
+        return jsonify(test_schedule.stop())
+    try:
+        payload = request.get_json() or {}
+        if not isinstance(payload, dict):
+            raise ValueError("请求内容必须是 JSON 对象")
+        configuration = load_test_config(payload) if payload.get("config_id") else test_configuration(payload)
+        interval = float(payload.get("interval_minutes", configuration.get("interval_minutes", 60)))
+        if not math.isfinite(interval) or not 1 <= interval <= 1440:
+            raise ValueError("测试间隔必须在 1 到 1440 分钟之间")
+        return jsonify(test_schedule.start(configuration, interval * 60)), 201
+    except (TypeError, ValueError) as error:
+        return jsonify({"error": str(error)}), 400
+    except LookupError as error:
+        return jsonify({"error": str(error)}), 404
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 409
 
 
 @app.get("/api/bank")

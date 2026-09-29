@@ -42,20 +42,64 @@
         </section>
 
         <section id="test-api" class="mode-panel">
-          <form id="api-test-form" class="form-panel">
-            <div class="form-grid two">
-              <label><span>Base URL</span><input id="test-api-base" required placeholder="https://example.com/v1"></label>
-              <label><span>接口模型名</span><input id="test-api-model" required placeholder="模型名"></label>
-              <label><span>API Key</span><input id="test-api-key" type="password" required autocomplete="off"></label>
-              <label><span>温度（可选）</span><input id="test-temperature" type="number" min="0" max="2" step="0.1" placeholder="接口默认"></label>
+          <div class="api-workspace-header"><div><h2>API 测试工作区</h2><p id="api-key-storage">正在读取本机配置…</p></div><span class="privacy-badge">本地服务</span></div>
+          <div id="api-workspace-message" class="message" role="status" hidden></div>
+          <div class="api-workspace-grid">
+            <aside class="api-config-panel" aria-labelledby="api-config-heading">
+              <div class="api-panel-heading"><div><h3 id="api-config-heading">API 配置</h3><span id="api-config-count">正在读取…</span></div><button id="api-new-config" class="button secondary small" type="button">新建配置</button></div>
+              <div id="api-config-list" class="api-config-list" role="group" aria-label="已保存的 API 配置"></div>
+              <p id="api-config-empty" class="api-empty" hidden>还没有配置。点击「新建配置」保存你的第一个接口。</p>
+            </aside>
+            <div class="api-run-panel">
+              <section class="api-selected-card" aria-labelledby="api-selected-name">
+                <div class="api-panel-heading"><div><span class="api-eyebrow">当前配置</span><h3 id="api-selected-name">先创建一组 API 配置</h3></div><div class="api-inline-actions"><button id="api-edit-config" class="button secondary small" type="button" disabled>编辑</button><button id="api-delete-config" class="button secondary small danger-text" type="button" disabled>删除</button></div></div>
+                <p id="api-selected-meta" class="api-muted">保存接口与模型，之后可直接复用。</p>
+                <p id="api-selected-url" class="api-endpoint"></p>
+                <div class="api-run-actions"><button id="api-run" class="button primary" type="button" disabled>立即测试</button><span class="api-muted">目标 3 份有效回答，最多尝试 6 个挑战</span></div>
+              </section>
+              <section class="api-schedule-card" aria-labelledby="api-schedule-heading">
+                <div class="api-panel-heading"><h3 id="api-schedule-heading">定时自动测试</h3><span id="api-schedule-status" class="api-status" role="status">正在读取…</span></div>
+                <p id="api-schedule-meta" class="api-muted"></p>
+                <div class="api-inline-actions"><button id="api-schedule-start" class="button secondary" type="button" disabled>开启定时</button><button id="api-schedule-stop" class="button secondary" type="button" disabled>停止定时</button></div>
+                <p class="api-help">关闭页面后继续运行，服务重启后需重新开启。一次运行一个定时任务；编辑配置后，停止再开启才会生效。</p>
+              </section>
+              <section id="api-test-progress" class="progress-panel" hidden aria-label="当前测试进度">
+                <div class="progress-heading" role="status"><strong id="api-progress-status">准备测试</strong><span id="api-progress-count">有效 0/3 · 已尝试 0/6</span></div>
+                <div class="progress-track"><i id="api-progress-fill"></i></div>
+                <div id="api-progress-steps" class="progress-steps"></div>
+                <ul id="api-test-errors" class="test-errors"></ul>
+                <div id="api-stream-output" class="stream-output" hidden><strong id="api-stream-title">当前挑战输出</strong><pre id="api-stream-text" aria-label="当前挑战输出" tabindex="0"></pre></div>
+              </section>
             </div>
-            <div class="form-footer"><button class="button primary" type="submit">开始测试</button></div>
-          </form>
-          <section id="api-test-progress" class="progress-panel" hidden aria-live="polite">
-            <div class="progress-heading"><strong id="api-progress-status">准备测试</strong><span id="api-progress-count">有效 0/3 · 已尝试 0/6</span></div>
-            <div class="progress-track"><i id="api-progress-fill"></i></div>
-            <div id="api-progress-steps" class="progress-steps"></div>
+          <section class="api-history-panel" aria-labelledby="api-history-heading">
+            <div class="api-panel-heading"><div><h3 id="api-history-heading">测试历史</h3><p class="api-muted">手动与定时测试统一记录，删除配置仍保留历史。</p></div><div class="api-inline-actions"><label class="api-filter"><span>筛选配置</span><select id="api-history-filter"><option value="">全部配置</option></select></label><button id="api-history-refresh" class="button secondary small" type="button">刷新</button></div></div>
+            <p id="api-history-error" class="api-error" role="alert"></p>
+            <p id="api-history-empty" class="api-empty">正在读取测试历史…</p>
+            <div id="api-history-table" class="table-wrap" role="region" aria-label="测试历史列表，可横向滚动" tabindex="0" hidden><table><thead><tr><th>开始时间</th><th>配置 / 模型</th><th>来源</th><th>状态</th><th>归因结果 / 原因</th><th>操作</th></tr></thead><tbody id="api-history-body"></tbody></table></div>
+            <div class="api-pagination"><span id="api-history-page">共 0 条</span><div class="api-inline-actions"><button id="api-history-prev" class="button secondary small" type="button" disabled>上一页</button><button id="api-history-next" class="button secondary small" type="button" disabled>下一页</button></div></div>
           </section>
+          </div>
+          <section id="api-run-detail" class="api-detail-panel" hidden aria-labelledby="api-detail-title">
+            <div class="api-panel-heading"><h3 id="api-detail-title">测试详情</h3><button id="api-detail-close" class="button secondary small" type="button">收起详情</button></div>
+            <p id="api-detail-summary" class="api-muted"></p><div id="api-detail-result" class="api-detail-result"></div>
+          </section>
+          <dialog id="api-config-dialog" class="api-config-dialog" aria-labelledby="api-config-title">
+            <form id="api-config-form">
+              <div class="api-panel-heading"><h2 id="api-config-title">新建 API 配置</h2></div>
+              <p class="api-muted">保存后可复用；密钥留空可保留编辑前的值。</p>
+              <div class="form-grid two">
+                <label class="api-field-wide"><span>配置名称</span><input id="config-name" required maxlength="100" placeholder="例如：日常模型测试"></label>
+                <label class="api-field-wide"><span>Base URL</span><input id="config-base" type="url" required placeholder="https://example.com/v1"></label>
+                <label><span>接口模型名</span><input id="config-model" required placeholder="实际请求使用的模型名"></label>
+                <label><span>API Key</span><input id="config-key" type="password" autocomplete="off" required></label>
+                <label><span>温度（可选）</span><input id="config-temperature" type="number" min="0" max="2" step="any" placeholder="接口默认"></label>
+                <label><span>每轮结束后间隔（分钟）</span><input id="config-interval" type="number" min="1" max="1440" step="any" value="60" required></label>
+              </div>
+              <label class="checkbox-label api-stream-switch"><input id="config-stream" type="checkbox" checked><span>流式输出 · 逐段查看当前挑战回答</span></label>
+              <p id="api-config-error" class="api-error" role="alert"></p>
+              <div class="api-dialog-actions"><button id="api-config-cancel" class="button secondary" type="button">取消</button><button id="api-config-save" class="button primary" type="submit">保存配置</button></div>
+            </form>
+          </dialog>
         </section>
 
         <div id="test-message" class="message" hidden></div>
@@ -101,6 +145,6 @@
 
   <datalist id="model-options">{% for model in bank.models %}<option value="{{ model.id }}">{% endfor %}</datalist>
   <script>window.BANK_SUMMARIES = {{ banks | tojson }}; window.UNIFIED_SUMMARY = {{ unified | tojson }}; window.DEFAULT_BANK_ID = {{ default_bank_id | tojson }};</script>
-  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script type="module" src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

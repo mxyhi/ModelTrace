@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import random
@@ -9,13 +10,17 @@ import secrets
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Iterator
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event
 
 from fingerprint import analyze_global_outputs, generate_challenges, parse_numbers
 from bank_builder import build_bank, read_rows
 from challenge_suite import fingerprint_suite
+from completion_stream import completion_deltas
 
 
 PROJECT = Path(__file__).resolve().parent
@@ -31,6 +36,7 @@ DEFAULT_UPSTREAM_USER_AGENT = (
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY = 1.0
+logger = logging.getLogger(__name__)
 
 
 def upstream_user_agent() -> str:
@@ -203,7 +209,7 @@ def _compact_upstream_error(details: str, fallback: str) -> str:
     return text[:500]
 
 
-def _request_completion(
+def _iter_completion(
     base_url: str,
     api_key: str,
     api_model: str,
@@ -211,7 +217,9 @@ def _request_completion(
     temperature: float | None,
     api_format: str,
     system_prompt: str = "",
-) -> str:
+    stream: bool = False,
+    cancel: Event | None = None,
+) -> Iterator[str]:
     if api_format == "anthropic":
         body_data = {
             "model": api_model,
@@ -244,27 +252,53 @@ def _request_completion(
         }
     if temperature is not None:
         body_data["temperature"] = temperature
+    body_data["stream"] = stream
+    if stream:
+        headers["Accept"] = "text/event-stream"
     body = json.dumps(body_data).encode("utf-8")
     url = completion_url(base_url, api_format)
     payload = None
+    emitted = False
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        if cancel is not None and cancel.is_set():
+            raise CancelledError("定时测试已停止")
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=240) as response:
+                if stream:
+                    if "text/event-stream" not in response.headers.get("Content-Type", ""):
+                        raise RuntimeError("上游未返回流式响应，可关闭流式输出后重试")
+                    for text in completion_deltas(response, api_format):
+                        if cancel is not None and cancel.is_set():
+                            raise CancelledError("定时测试已停止")
+                        emitted = True
+                        yield text
+                    return
                 payload = json.loads(response.read().decode("utf-8"))
             break
         except urllib.error.HTTPError as error:
-            details = error.read().decode("utf-8", errors="replace").strip()
+            with error:
+                details = error.read().decode("utf-8", errors="replace").strip()
             message = _compact_upstream_error(details, error.reason)
             retried = f"（已自动重试 {attempt - 1} 次）" if attempt > 1 else ""
+            logger.warning("upstream_http_error format=%s attempt=%s status=%s", api_format, attempt, error.code)
             if attempt < MAX_ATTEMPTS and error.code in RETRYABLE_STATUS:
-                time.sleep(RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5))
+                delay = RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5)
+                if cancel is not None:
+                    cancel.wait(delay)
+                else:
+                    time.sleep(delay)
                 continue
             raise RuntimeError(f"HTTP {error.code}: {message}{retried}") from error
         except urllib.error.URLError as error:
             reason = getattr(error, "reason", str(error))
-            if attempt < MAX_ATTEMPTS:
-                time.sleep(RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5))
+            logger.warning("upstream_connection_error format=%s attempt=%s emitted=%s", api_format, attempt, emitted)
+            if attempt < MAX_ATTEMPTS and not emitted:
+                delay = RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5)
+                if cancel is not None:
+                    cancel.wait(delay)
+                else:
+                    time.sleep(delay)
                 continue
             retried = f"（已自动重试 {attempt - 1} 次）" if attempt > 1 else ""
             raise RuntimeError(f"无法连接接口：{reason}{retried}") from error
@@ -286,7 +320,39 @@ def _request_completion(
             content = "".join(part.get("text", "") for part in content)
         if choice.get("finish_reason") in {"length", "content_filter"}:
             raise RuntimeError(f"回答未正常完成（{choice['finish_reason']}），本次回答不计入")
-    return str(content)
+    yield str(content)
+
+
+def iter_completion(
+    base_url: str,
+    api_key: str,
+    api_model: str,
+    prompt: str,
+    temperature: float | None,
+    api_format: str = "auto",
+    system_prompt: str = "",
+    stream: bool = False,
+    cancel: Event | None = None,
+) -> Iterator[str]:
+    formats = ("openai", "anthropic") if api_format == "auto" else (api_format,)
+    errors = []
+    for candidate in formats:
+        emitted = False
+        try:
+            for text in _iter_completion(
+                base_url, api_key, api_model, prompt, temperature, candidate, system_prompt, stream, cancel
+            ):
+                emitted = True
+                yield text
+            return
+        except RuntimeError as error:
+            message = str(error).replace(api_key, "[已隐藏]") if api_key else str(error)
+            logger.warning("completion_failed format=%s stream=%s emitted=%s error=%s", candidate, stream, emitted, message)
+            # 已向页面输出正文后不能切换协议并拼接另一个回答。
+            if emitted or api_format != "auto":
+                raise
+            errors.append(f"{candidate}: {error}")
+    raise RuntimeError("接口格式自动探测失败；" + "；".join(errors))
 
 
 def request_completion(
@@ -297,46 +363,52 @@ def request_completion(
     temperature: float | None,
     api_format: str = "auto",
     system_prompt: str = "",
+    stream: bool = False,
+    cancel: Event | None = None,
 ) -> str:
-    if api_format != "auto":
-        return _request_completion(
-            base_url, api_key, api_model, prompt, temperature, api_format, system_prompt
-        )
-    formats = ("openai", "anthropic")
-    errors = []
-    for candidate in formats:
-        try:
-            return _request_completion(
-                base_url, api_key, api_model, prompt, temperature, candidate, system_prompt
-            )
-        except RuntimeError as error:
-            errors.append(f"{candidate}: {error}")
-    raise RuntimeError("接口格式自动探测失败；" + "；".join(errors))
+    return "".join(iter_completion(
+        base_url, api_key, api_model, prompt, temperature, api_format, system_prompt, stream, cancel
+    ))
 
 
-def test_automatic(
+def iter_test_events(
     base_url: str,
     api_key: str,
     api_model: str,
     temperature: float | None,
     bank: dict,
     api_format: str = "openai",
-) -> dict:
+    stream: bool = False,
+    cancel: Event | None = None,
+) -> Iterator[dict]:
     target_count = 3
     max_attempts = 6
     challenges = generate_challenges(max_attempts)
     outputs = []
     errors = []
-    for challenge in challenges:
+    for attempt, challenge in enumerate(challenges, 1):
+        if cancel is not None and cancel.is_set():
+            raise CancelledError("定时测试已停止")
+        yield {"type": "challenge", "attempt": attempt, "target": target_count, "max_attempts": max_attempts}
         try:
-            text = request_completion(
+            parts = []
+            with closing(iter_completion(
                 base_url,
                 api_key,
                 api_model,
                 challenge["prompt"],
                 temperature,
                 api_format,
-            )
+                stream=stream,
+                cancel=cancel,
+            )) as chunks:
+                for text in chunks:
+                    parts.append(text)
+                    if stream:
+                        yield {"type": "delta", "text": text}
+            text = "".join(parts)
+            if cancel is not None and cancel.is_set():
+                raise CancelledError("定时测试已停止")
             minimum = max(80, math.ceil(challenge["expected_count"] * 0.55))
             parsed_count = len(parse_numbers(text))
             if parsed_count >= minimum:
@@ -348,10 +420,17 @@ def test_automatic(
                 )
             else:
                 errors.append(f"有效数字不足：{parsed_count}/{minimum}")
+            yield {"type": "challenge_result", "attempt": attempt, "accepted": parsed_count >= minimum,
+                   "parsed_numbers": parsed_count, "minimum_numbers": minimum}
+        except CancelledError:
+            raise
         except Exception as error:
             errors.append(str(error))
+            yield {"type": "challenge_error", "attempt": attempt, "error": str(error)}
         if len(outputs) == target_count:
             break
+    if not outputs:
+        raise ValueError("没有获得可分析输出。" + "；".join(errors))
     result = analyze_global_outputs(outputs, bank)
     result["api_test"] = {
         "requested": target_count,
@@ -360,7 +439,23 @@ def test_automatic(
         "received": len(outputs),
         "errors": errors,
     }
-    return result
+    yield {"type": "result", "result": result}
+
+
+def test_automatic(
+    base_url: str,
+    api_key: str,
+    api_model: str,
+    temperature: float | None,
+    bank: dict,
+    api_format: str = "openai",
+    stream: bool = False,
+    cancel: Event | None = None,
+) -> dict:
+    for event in iter_test_events(base_url, api_key, api_model, temperature, bank, api_format, stream, cancel):
+        if event["type"] == "result":
+            return event["result"]
+    raise RuntimeError("测试未返回结果")
 
 
 def enroll_automatic(
