@@ -326,7 +326,7 @@ async function createBank(event) {
   button.disabled = false;
 }
 
-document.querySelectorAll("[data-workspace]").forEach((button) => button.addEventListener("click", () => activateWorkspace(button.dataset.workspace)));
+document.querySelectorAll("[data-workspace]").forEach((button) => button.addEventListener("click", () => navigate(`#/${button.dataset.workspace}`)));
 document.querySelectorAll("[data-test-mode]").forEach((button) => button.addEventListener("click", () => activateMode("test", button.dataset.testMode)));
 byId("bank-select").addEventListener("change", (event) => selectBank(event.target.value));
 byId("regenerate").addEventListener("click", loadChallenges);
@@ -338,4 +338,20 @@ byId("create-bank-form").addEventListener("submit", createBank);
 
 renderInventory();
 loadChallenges();
-bindApiMonitor(renderResult);
+const apiMonitor = bindApiMonitor(renderResult);
+
+// 页面路由：#/test、#/library、#/api、#/api/<配置 ID>；刷新页面和浏览器前进后退都停留在当前视图。
+function route() {
+  const [name, detailId] = location.hash.replace(/^#\/?/, "").split("/");
+  const workspace = byId(`workspace-${name}`) ? name : "test";
+  activateWorkspace(workspace);
+  if (workspace === "api") apiMonitor.open(detailId ? decodeURIComponent(detailId) : null);
+}
+
+function navigate(hash) {
+  if (location.hash !== hash) history.pushState(null, "", hash);
+  route();
+}
+
+window.addEventListener("popstate", route);
+route();

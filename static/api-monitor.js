@@ -85,9 +85,9 @@ export function bindApiMonitor(renderResult) {
     const pill = byId("monitor-schedule-state");
     const toggle = byId("monitor-schedule-toggle");
     let meta;
+    // 开关本身表达开/关，状态标签只在本配置定时运行时显示当前阶段。
+    pill.hidden = !mine;
     if (!schedule) {
-      pill.textContent = "读取中";
-      pill.dataset.tone = "idle";
       meta = "";
     } else if (mine) {
       pill.textContent = scheduleStatus[mine.state];
@@ -95,14 +95,12 @@ export function bindApiMonitor(renderResult) {
       meta = mine.state === "stopping" ? "等待当前请求结束后停止"
         : `每轮结束后等待 ${mine.interval_minutes} 分钟${mine.next_run_at ? ` · 下次 ${dateTime(mine.next_run_at)}` : ""} · 修改配置后需重新开启才生效`;
     } else {
-      pill.textContent = "未开启";
-      pill.dataset.tone = "idle";
       meta = schedule.state !== "stopped"
         ? `「${schedule.config_name}」正在定时测试，同一时间只运行一个定时任务`
         : `开启后立即测试一轮，之后每轮结束等待 ${config.interval_minutes} 分钟；关闭页面仍继续，服务重启后需重新开启`;
     }
     byId("monitor-schedule-meta").textContent = meta;
-    toggle.textContent = mine ? "停止定时" : "开启定时";
+    toggle.setAttribute("aria-checked", String(Boolean(mine)));
     toggle.disabled = !schedule || view.scheduleBusy || (mine ? mine.state === "stopping" : schedule.state !== "stopped");
   }
 
@@ -127,11 +125,17 @@ export function bindApiMonitor(renderResult) {
   }
 
   function showView(detailId) {
+    const previous = view.detailId;
     view.detailId = detailId;
     byId("monitor-list-view").hidden = Boolean(detailId);
     byId("monitor-detail-view").hidden = !detailId;
     message();
-    if (!detailId) return renderGrid();
+    if (!detailId) {
+      renderGrid();
+      // 从详情返回列表时把焦点还给对应卡片。
+      if (previous) byId("monitor-grid").querySelector(`[data-config-id="${CSS.escape(previous)}"]`)?.focus();
+      return;
+    }
     view.page = 0;
     view.rowsHtml = "";
     byId("monitor-records-rows").replaceChildren();
@@ -149,8 +153,8 @@ export function bindApiMonitor(renderResult) {
     const payload = await request("/api/test/configs");
     view.configs = payload.configs;
     view.loaded = true;
-    // 其他页面删除了当前配置时回到列表。
-    if (view.detailId && !current()) showView(null);
+    // 地址中的配置不存在或已在其他页面删除时回到列表。
+    if (view.detailId && !current()) go(null, true);
     renderGrid();
     renderDetail();
   }
@@ -244,7 +248,7 @@ export function bindApiMonitor(renderResult) {
       const { config } = await request(`/api/test/configs${editing ? `/${encodeURIComponent(editing)}` : ""}`, jsonRequest(editing ? "PATCH" : "POST", values));
       configDialog.close();
       await loadConfigs();
-      if (!editing) showView(config.id);
+      if (!editing) go(config.id);
       else message(activeSchedule(config) ? "配置已保存。定时任务仍使用开启时的配置，停止后重新开启才会生效。" : "配置已保存。", "success");
     } catch (error) {
       byId("monitor-config-error").textContent = error.message;
@@ -265,7 +269,7 @@ export function bindApiMonitor(renderResult) {
     renderDetail();
     try {
       const { deleted_runs: deletedRuns } = await request(`/api/test/configs/${encodeURIComponent(config.id)}`, { method: "DELETE" });
-      showView(null);
+      go(null, true);
       await loadConfigs();
       message(`已删除配置「${config.name}」${deletedRuns ? `及 ${deletedRuns} 条测试记录` : ""}。`, "success");
     } catch (error) {
@@ -413,22 +417,29 @@ export function bindApiMonitor(renderResult) {
       await loadHistory();
       if (view.refreshFailed) { view.refreshFailed = false; message(); }
     } catch (error) {
-      if (!view.loaded) byId("monitor-loading").textContent = `配置读取失败：${error.message}`;
+      if (!view.loaded) {
+        byId("monitor-loading").textContent = `配置读取失败：${error.message}`;
+        // 直接打开详情地址时列表不可见，失败原因显示在详情页。
+        if (view.detailId) message(`配置读取失败：${error.message}`);
+      }
       else { view.refreshFailed = true; message(`刷新失败：${error.message}`); }
     }
+  }
+
+  // 详情页地址为 #/api/<配置 ID>；主动跳转写入历史，配置失效时用 replace，避免后退回到空详情。
+  function go(detailId, replace = false) {
+    const hash = detailId ? `#/api/${encodeURIComponent(detailId)}` : "#/api";
+    if (location.hash !== hash) history[replace ? "replaceState" : "pushState"](null, "", hash);
+    showView(detailId);
   }
 
   byId("monitor-new").addEventListener("click", () => editConfig());
   byId("monitor-empty-new").addEventListener("click", () => editConfig());
   byId("monitor-grid").addEventListener("click", (event) => {
     const card = event.target.closest("[data-config-id]");
-    if (card) showView(card.dataset.configId);
+    if (card) go(card.dataset.configId);
   });
-  byId("monitor-back").addEventListener("click", () => {
-    const id = view.detailId;
-    showView(null);
-    byId("monitor-grid").querySelector(`[data-config-id="${CSS.escape(id)}"]`)?.focus();
-  });
+  byId("monitor-back").addEventListener("click", () => go(null));
   byId("monitor-edit").addEventListener("click", () => editConfig(current()));
   byId("monitor-delete").addEventListener("click", deleteConfig);
   byId("monitor-run").addEventListener("click", runTest);
@@ -451,15 +462,18 @@ export function bindApiMonitor(renderResult) {
       if (close && !(dialog === configDialog && view.configBusy)) dialog.close();
     });
   }
-  document.querySelector('[data-workspace="api"]').addEventListener("click", () => {
-    if (view.detailId) showView(null);
-    refresh();
-  });
-
   // 定时任务由服务端运行，页面只在可见时轮询状态、卡片与当前页记录。
   async function poll() {
     if (!document.hidden && byId("workspace-api").classList.contains("active")) await refresh();
     window.setTimeout(poll, 5000);
   }
-  refresh().finally(() => window.setTimeout(poll, 5000));
+  window.setTimeout(poll, 5000);
+
+  // 路由入口：进入 API 监测、刷新页面或浏览器前进后退时由 app.js 调用；首次数据也在这里读取。
+  return {
+    open(detailId) {
+      if (detailId !== view.detailId) showView(detailId);
+      refresh();
+    },
+  };
 }

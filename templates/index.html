@@ -130,12 +130,12 @@
           </div>
           <section class="monitor-actions" aria-label="测试操作">
             <div class="monitor-action-row">
-              <div><strong>立即测试</strong><span>目标 3 份有效回答，最多尝试 6 个挑战</span></div>
+              <div><strong>手动测试</strong><span>目标 3 份有效回答，最多尝试 6 个挑战</span></div>
               <button id="monitor-run" class="button primary" type="button">立即测试</button>
             </div>
-            <div class="monitor-action-row">
-              <div><strong>定时测试 <span id="monitor-schedule-state" class="monitor-pill">读取中</span></strong><span id="monitor-schedule-meta"></span></div>
-              <button id="monitor-schedule-toggle" class="button secondary" type="button" disabled>开启定时</button>
+            <div class="monitor-action-row monitor-switch-row">
+              <div><strong>定时测试 <span id="monitor-schedule-state" class="monitor-pill" hidden></span></strong><span id="monitor-schedule-meta"></span></div>
+              <button id="monitor-schedule-toggle" class="monitor-switch" type="button" role="switch" aria-checked="false" aria-label="定时测试" disabled></button>
             </div>
           </section>
           <section id="monitor-progress" class="progress-panel" hidden aria-label="当前测试进度">
