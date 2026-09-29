@@ -1,5 +1,5 @@
 import { randomInt } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LANGUAGES } from './prompts.mjs';
@@ -437,4 +437,6 @@ export async function main(args = process.argv.slice(2)) {
   finally { dispatchQueuedCleanups(); }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
+// macOS 的 /var 与 /private/var 可能指向同一入口，先解析符号链接。
+const entryPath = process.argv[1] ? await realpath(process.argv[1]).catch(() => null) : null;
+if (entryPath === await realpath(fileURLToPath(import.meta.url))) await main();

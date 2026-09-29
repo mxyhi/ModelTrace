@@ -115,6 +115,8 @@ test('model catalogue reads retain native query parameters and do not inject thr
 test('closing the cache transport tears down active connections and is idempotent', async t => {
   const f = await fixture(t), url = new URL(f.relay.url);
   const socket = net.connect(Number(url.port), url.hostname);
+  // 主动销毁连接在部分平台上会先发 ECONNRESET，再发 close。
+  socket.on('error', error => assert.equal(error.code, 'ECONNRESET'));
   await new Promise(resolve => socket.once('connect', resolve));
   const closed = new Promise(resolve => socket.once('close', resolve));
   await f.relay.close(); await closed; await f.relay.close();
