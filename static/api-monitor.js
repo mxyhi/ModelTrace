@@ -11,6 +11,11 @@ const runStatus = { running: "进行中", success: "成功", error: "失败", ca
 const scheduleStatus = { running: "正在测试", waiting: "等待下一轮", stopping: "正在停止" };
 const stepLabels = { pending: "等待", working: "请求中", done: "有效", invalid: "数字不足", error: "接口失败", skipped: "无需调用" };
 const PAGE_SIZE = 10;
+const LAYOUT_KEY = "modeltrace.monitor-layout";
+const resultText = (run) => `${escape(run.prediction)} · ${percent(run.probability)}`;
+const statusPill = (run) => `<span class="monitor-pill" data-tone="${escape(run?.status || "idle")}">${run ? runStatus[run.status] || escape(run.status) : "未测试"}</span>`;
+const lastOutcome = (run) => run.status === "success" ? resultText(run)
+  : escape(run.error || (run.status === "running" ? "等待完成" : runStatus[run.status] || run.status));
 
 async function request(url, options = {}) {
   const response = await fetch(url, { cache: "no-store", ...options });
@@ -23,11 +28,12 @@ const jsonRequest = (method, values) => ({
   method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
 });
 
-// API 监测：配置卡片列表 → 配置详情（操作、进度、分页测试记录）。
+// API 监测：配置列表（卡片 / 表格）→ 配置详情（操作、进度、分页测试记录）。
 export function bindApiMonitor(renderResult) {
   const view = {
     configs: [], loaded: false, detailId: null, schedule: null, page: 0, total: 0,
-    gridHtml: "", rowsHtml: "", editingId: null, runConfigId: null, runResult: false,
+    layout: localStorage.getItem(LAYOUT_KEY) === "table" ? "table" : "cards",
+    listHtml: "", rowsHtml: "", editingId: null, runConfigId: null, runResult: false,
     runBusy: false, configBusy: false, scheduleBusy: false, refreshFailed: false,
   };
   let scheduleVersion = 0;
@@ -48,33 +54,69 @@ export function bindApiMonitor(renderResult) {
     }
   }
 
-  function renderGrid() {
+  const listContainer = () => byId(view.layout === "table" ? "monitor-table-rows" : "monitor-grid");
+  const schedulePill = (config) => {
+    const schedule = activeSchedule(config);
+    return schedule ? `<span class="monitor-pill" data-tone="${schedule.state === "stopping" ? "cancelled" : "running"}">${scheduleStatus[schedule.state]}</span>` : "";
+  };
+
+  function cardHtml(config) {
+    const last = config.last_run;
+    const success = config.last_success;
+    return `<button type="button" class="monitor-card" data-config-id="${escape(config.id)}">
+      <span class="monitor-card-head"><strong>${escape(config.name)}</strong>${schedulePill(config)}</span>
+      <span class="monitor-card-model">${escape(config.api_model)}</span>
+      <span class="monitor-card-url">${escape(config.base_url)}</span>
+      <span class="monitor-card-foot">
+        <span class="monitor-card-line"><span>${last ? `最近 ${escape(dateTime(last.started_at))}` : "最近结果"}</span><span>${config.run_count} 条记录</span></span>
+        <span class="monitor-card-line">${statusPill(last)}<span class="monitor-card-outcome">${last ? lastOutcome(last) : "尚未测试"}</span></span>
+        <span class="monitor-card-line"><span>最近成功</span><span>${success ? escape(dateTime(success.started_at)) : "暂无成功记录"}</span></span>
+        ${success ? `<span class="monitor-card-success" title="${resultText(success)}">${resultText(success)}</span>` : ""}
+      </span>
+    </button>`;
+  }
+
+  // 整行可点击进入详情；名称按钮承担键盘焦点。失败原因可能很长，表格内截断并用 title 展示全文。
+  function rowHtml(config) {
+    const last = config.last_run;
+    const success = config.last_success;
+    const lastNote = last && last.status !== "success" ? ` · ${lastOutcome(last)}` : "";
+    return `<tr data-config-id="${escape(config.id)}">
+      <td><button class="monitor-link" type="button" data-config-id="${escape(config.id)}">${escape(config.name)}</button><small>${escape(config.base_url)}</small></td>
+      <td>${escape(config.api_model)}</td>
+      <td>${schedulePill(config) || '<span class="monitor-muted">未开启</span>'}</td>
+      <td>${statusPill(last)}${last ? `<small title="${escape(dateTime(last.started_at))}${lastNote}">${escape(dateTime(last.started_at))}${lastNote}</small>` : ""}</td>
+      <td>${success ? `<strong>${resultText(success)}</strong><small>${escape(dateTime(success.started_at))}</small>` : '<span class="monitor-muted">暂无成功记录</span>'}</td>
+      <td>${config.run_count} 条</td>
+    </tr>`;
+  }
+
+  function renderList() {
     byId("monitor-loading").hidden = view.loaded;
     byId("monitor-empty").hidden = !view.loaded || view.configs.length > 0;
-    byId("monitor-grid").hidden = !view.configs.length;
-    const html = view.configs.map((config) => {
-      const schedule = activeSchedule(config);
-      const last = config.last_run;
-      const outcome = !last ? "尚未测试"
-        : last.status === "success" ? `${escape(last.prediction)} · ${percent(last.probability)}`
-          : escape(last.error || runStatus[last.status] || last.status);
-      return `<button type="button" class="monitor-card" data-config-id="${escape(config.id)}">
-        <span class="monitor-card-head"><strong>${escape(config.name)}</strong>${schedule ? `<span class="monitor-pill" data-tone="${schedule.state === "stopping" ? "cancelled" : "running"}">${scheduleStatus[schedule.state]}</span>` : ""}</span>
-        <span class="monitor-card-model">${escape(config.api_model)}</span>
-        <span class="monitor-card-url">${escape(config.base_url)}</span>
-        <span class="monitor-card-foot">
-          <span class="monitor-card-line"><span>${last ? `最近 ${escape(dateTime(last.started_at))}` : "最近结果"}</span><span>${config.run_count} 条记录</span></span>
-          <span class="monitor-card-line"><span class="monitor-pill" data-tone="${escape(last?.status || "idle")}">${last ? runStatus[last.status] || escape(last.status) : "未测试"}</span><span class="monitor-card-outcome">${outcome}</span></span>
-        </span>
-      </button>`;
-    }).join("");
+    byId("monitor-grid").hidden = !view.configs.length || view.layout !== "cards";
+    byId("monitor-table").hidden = !view.configs.length || view.layout !== "table";
+    const container = listContainer();
+    const html = view.configs.map(view.layout === "table" ? rowHtml : cardHtml).join("");
     // 轮询刷新时内容不变就不重绘，避免键盘焦点丢失。
-    if (html !== view.gridHtml) {
-      const focused = document.activeElement?.dataset.configId;
-      byId("monitor-grid").innerHTML = html;
-      view.gridHtml = html;
-      if (focused) byId("monitor-grid").querySelector(`[data-config-id="${CSS.escape(focused)}"]`)?.focus();
+    if (html !== view.listHtml) {
+      const focused = container.contains(document.activeElement) ? document.activeElement.dataset.configId : null;
+      container.innerHTML = html;
+      view.listHtml = html;
+      if (focused) container.querySelector(`button[data-config-id="${CSS.escape(focused)}"]`)?.focus();
     }
+  }
+
+  function setLayout(layout) {
+    view.layout = layout;
+    view.listHtml = "";
+    localStorage.setItem(LAYOUT_KEY, layout);
+    for (const button of document.querySelectorAll("[data-monitor-layout]")) {
+      const active = button.dataset.monitorLayout === layout;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+    renderList();
   }
 
   function renderSchedule() {
@@ -131,9 +173,9 @@ export function bindApiMonitor(renderResult) {
     byId("monitor-detail-view").hidden = !detailId;
     message();
     if (!detailId) {
-      renderGrid();
-      // 从详情返回列表时把焦点还给对应卡片。
-      if (previous) byId("monitor-grid").querySelector(`[data-config-id="${CSS.escape(previous)}"]`)?.focus();
+      renderList();
+      // 从详情返回列表时把焦点还给对应卡片或表格行。
+      if (previous) listContainer().querySelector(`button[data-config-id="${CSS.escape(previous)}"]`)?.focus();
       return;
     }
     view.page = 0;
@@ -155,7 +197,7 @@ export function bindApiMonitor(renderResult) {
     view.loaded = true;
     // 地址中的配置不存在或已在其他页面删除时回到列表。
     if (view.detailId && !current()) go(null, true);
-    renderGrid();
+    renderList();
     renderDetail();
   }
 
@@ -169,7 +211,7 @@ export function bindApiMonitor(renderResult) {
       if (version === scheduleVersion) byId("monitor-schedule-meta").textContent = `定时状态读取失败：${error.message}`;
       return;
     }
-    renderGrid();
+    renderList();
     renderSchedule();
   }
 
@@ -294,7 +336,7 @@ export function bindApiMonitor(renderResult) {
       message(error.message);
     } finally {
       view.scheduleBusy = false;
-      renderGrid();
+      renderList();
       renderSchedule();
       await refresh();
     }
@@ -435,10 +477,15 @@ export function bindApiMonitor(renderResult) {
 
   byId("monitor-new").addEventListener("click", () => editConfig());
   byId("monitor-empty-new").addEventListener("click", () => editConfig());
-  byId("monitor-grid").addEventListener("click", (event) => {
-    const card = event.target.closest("[data-config-id]");
-    if (card) go(card.dataset.configId);
-  });
+  for (const button of document.querySelectorAll("[data-monitor-layout]")) {
+    button.addEventListener("click", () => setLayout(button.dataset.monitorLayout));
+  }
+  for (const id of ["monitor-grid", "monitor-table-rows"]) {
+    byId(id).addEventListener("click", (event) => {
+      const target = event.target.closest("[data-config-id]");
+      if (target) go(target.dataset.configId);
+    });
+  }
   byId("monitor-back").addEventListener("click", () => go(null));
   byId("monitor-edit").addEventListener("click", () => editConfig(current()));
   byId("monitor-delete").addEventListener("click", deleteConfig);
@@ -467,6 +514,7 @@ export function bindApiMonitor(renderResult) {
     if (!document.hidden && byId("workspace-api").classList.contains("active")) await refresh();
     window.setTimeout(poll, 5000);
   }
+  setLayout(view.layout);
   window.setTimeout(poll, 5000);
 
   // 路由入口：进入 API 监测、刷新页面或浏览器前进后退时由 app.js 调用；首次数据也在这里读取。

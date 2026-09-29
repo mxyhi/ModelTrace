@@ -27,6 +27,19 @@
 .monitor-card-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; color: var(--muted); font-size: 11px; }
 .monitor-card-line .monitor-pill { flex: 0 0 auto; }
 .monitor-card-outcome { min-width: 0; overflow: hidden; color: var(--text); font-size: 12px; font-weight: 650; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-card-success { min-width: 0; margin-top: -3px; overflow: hidden; color: var(--success); font-size: 13px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-muted { color: var(--muted); font-weight: 400; }
+.monitor-header-actions { align-items: center; }
+.monitor-layout-toggle { flex: 0 0 auto; margin: 0; }
+.monitor-layout-toggle .mode-tab { min-width: 64px; padding: 6px 12px; }
+/* 表格视图：整行可点击进入详情。 */
+.monitor-table { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
+.monitor-table tbody tr { cursor: pointer; transition: background .15s ease; }
+.monitor-table tbody tr:hover { background: var(--surface-soft); }
+.monitor-table td { vertical-align: middle; }
+.monitor-table td small { display: block; max-width: 280px; margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; }
+.monitor-table td:first-child small { font-family: Consolas, ui-monospace, monospace; }
+.monitor-table .monitor-link { padding: 0; font-size: 13px; }
 .monitor-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 52px 24px; text-align: center; background: var(--surface); border: 1px dashed var(--line-strong); border-radius: 9px; }
 .monitor-empty strong { font-size: 15px; }
 .monitor-empty p { max-width: 420px; margin: 0 0 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }

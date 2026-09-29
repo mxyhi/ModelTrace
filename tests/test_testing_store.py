@@ -122,12 +122,19 @@ class PersistedTestingTests(unittest.TestCase):
         self.store.finish_run(failed, "error", .1, error="测试失败")
         succeeded = self.store.start_run(self.store.config(first["id"], include_key=True), "scheduled")
         self.store.finish_run(succeeded, "success", .2, result={"prediction_name": "mock", "probability": .9, "used_outputs": 3})
+        # 最近一次失败时，仍要能看到之前最近一次成功的结果。
+        latest = self.store.start_run(self.store.config(first["id"], include_key=True), "manual")
+        self.store.finish_run(latest, "error", .1, error="最新失败")
         configs = {config["id"]: config for config in self.client.get("/api/test/configs").json["configs"]}
-        self.assertEqual(configs[first["id"]]["run_count"], 2)
-        self.assertEqual(configs[first["id"]]["last_run"]["status"], "success")
-        self.assertEqual(configs[first["id"]]["last_run"]["prediction"], "mock")
+        self.assertEqual(configs[first["id"]]["run_count"], 3)
+        self.assertEqual(configs[first["id"]]["last_run"]["status"], "error")
+        self.assertEqual(configs[first["id"]]["last_run"]["error"], "最新失败")
+        self.assertEqual(configs[first["id"]]["last_success"]["prediction"], "mock")
+        self.assertEqual(configs[first["id"]]["last_success"]["probability"], .9)
+        self.assertEqual(configs[first["id"]]["last_success"]["used_outputs"], 3)
         self.assertEqual(configs[second["id"]]["run_count"], 0)
         self.assertIsNone(configs[second["id"]]["last_run"])
+        self.assertIsNone(configs[second["id"]]["last_success"])
         self.assertNotIn(VALUES["api_key"], json.dumps(configs))
         self.assertTrue(all("api_key" not in config for config in configs.values()))
 

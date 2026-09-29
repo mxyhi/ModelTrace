@@ -57,20 +57,27 @@ class TestingStore:
         return value
 
     def configs(self) -> list[dict]:
-        """配置列表附带记录数和最近一次测试，供 API 监测卡片直接展示。"""
+        """配置列表附带记录数、最近一次测试和最近一次成功测试，供 API 监测卡片与表格直接展示。"""
         with self.connection() as db:
             rows = db.execute("""SELECT c.*, (SELECT count(*) FROM test_runs WHERE config_id=c.id) AS run_count,
                 r.status AS last_status, r.started_at AS last_started_at, r.prediction AS last_prediction,
-                r.probability AS last_probability, r.error AS last_error
+                r.probability AS last_probability, r.error AS last_error,
+                s.started_at AS success_started_at, s.prediction AS success_prediction,
+                s.probability AS success_probability, s.used_outputs AS success_used_outputs
                 FROM api_configs c LEFT JOIN test_runs r ON r.id=(
                     SELECT id FROM test_runs WHERE config_id=c.id ORDER BY started_at DESC, id DESC LIMIT 1)
+                LEFT JOIN test_runs s ON s.id=(
+                    SELECT id FROM test_runs WHERE config_id=c.id AND status='success'
+                    ORDER BY started_at DESC, id DESC LIMIT 1)
                 ORDER BY c.created_at, c.id""").fetchall()
         configs = []
         for row in rows:
             value = dict(row)
             last = {key.removeprefix("last_"): value.pop(key) for key in list(value) if key.startswith("last_")}
+            success = {key.removeprefix("success_"): value.pop(key) for key in list(value) if key.startswith("success_")}
             value = self.public_config(value)
             value["last_run"] = last if last["status"] else None
+            value["last_success"] = success if success["started_at"] else None
             configs.append(value)
         return configs
 

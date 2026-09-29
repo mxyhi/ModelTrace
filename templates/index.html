@@ -103,11 +103,18 @@
         <div id="monitor-list-view">
           <div class="page-header">
             <h1>API 监测</h1>
-            <button id="monitor-new" class="button primary" type="button">新建配置</button>
+            <div class="monitor-header-actions">
+              <div class="mode-tabs monitor-layout-toggle" role="group" aria-label="展示方式">
+                <button class="mode-tab active" type="button" data-monitor-layout="cards" aria-pressed="true">卡片</button>
+                <button class="mode-tab" type="button" data-monitor-layout="table" aria-pressed="false">表格</button>
+              </div>
+              <button id="monitor-new" class="button primary" type="button">新建配置</button>
+            </div>
           </div>
           <div id="monitor-list-message" class="message" role="status" hidden></div>
           <p id="monitor-loading" class="monitor-loading">正在读取配置…</p>
           <div id="monitor-grid" class="monitor-grid" hidden></div>
+          <div id="monitor-table" class="monitor-table table-wrap" role="region" aria-label="API 配置，可横向滚动" tabindex="0" hidden><table><thead><tr><th>配置</th><th>接口模型</th><th>定时</th><th>最近测试</th><th>最近成功结果</th><th>记录</th></tr></thead><tbody id="monitor-table-rows"></tbody></table></div>
           <section id="monitor-empty" class="monitor-empty" hidden>
             <strong>还没有 API 配置</strong>
             <p>保存接口地址、API Key 和模型后，可以随时测试，也可以按间隔定时测试。</p>
