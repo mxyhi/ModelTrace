@@ -75,7 +75,7 @@ templates/          页面模板
 
 ## 指纹库说明
 
-项目中现有指纹库共包含两个模型家族、16 个模型：
+项目中现有指纹库共包含两个模型家族、17 个模型：
 
 ```
 gpt-5.4
@@ -89,6 +89,7 @@ gpt-6-luna
 claude-haiku-4-5-20251001
 claude-sonnet-4-6
 claude-sonnet-5
+claude-sonnet-5-5
 claude-opus-4-6
 claude-opus-4-7
 claude-opus-4-8
