@@ -9,7 +9,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request
 from werkzeug.exceptions import HTTPException
 
-from fingerprint import analyze_global_outputs, generate_challenges, load_bank
+from fingerprint import analyze_global_outputs, analyze_outputs, generate_challenges, load_bank
 
 ALGORITHM_VERSION = "global-fingerprint-v1"
 
@@ -87,5 +87,37 @@ def create_app(bank_path: Path | None = None, token: str | None = None) -> Flask
             return jsonify(version=version, **result)
         except (ValueError, TypeError, KeyError) as error:
             return jsonify(error=str(error)), 422
+
+    @app.post("/v1/validate")
+    def validate():
+        try:
+            body, conflict = payload()
+        except (ValueError, TypeError) as error:
+            return jsonify(error=str(error)), 400
+        if conflict:
+            return conflict
+        output = body.get("output")
+        if (
+            not isinstance(output, dict)
+            or not isinstance(output.get("text"), str)
+            or len(output["text"]) > 100_000
+            or not isinstance(output.get("completion"), str)
+            or not output["completion"]
+            or type(output.get("expected_count")) is not int
+            or not 80 <= output["expected_count"] <= 1000
+        ):
+            return jsonify(error="回答参数无效"), 422
+        if output["completion"] != "complete":
+            return jsonify(version=version, valid=False, reason="incomplete_output")
+        try:
+            # 复用归因入口实际的数字解析和有效数量判定，禁止独立维护阈值。
+            analyze_outputs([output], bank)
+        except ValueError as error:
+            # 只有算法明确的无有效样本结果属于回答不合格；评分故障继续报错，
+            # 不得转换为 valid=false，避免控制平面误冷却供应账户。
+            if str(error).startswith("没有可用回答："):
+                return jsonify(version=version, valid=False, reason="insufficient_valid_numbers")
+            raise
+        return jsonify(version=version, valid=True)
 
     return app

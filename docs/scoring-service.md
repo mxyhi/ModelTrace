@@ -9,6 +9,11 @@
 | GET `/v1/health` | 返回 `status/version/models`，用于确认目标指纹存在 |
 | POST `/v1/challenges` | `{version,model,rounds:3}`；返回三轮，每轮三个独立挑战及 `expected_count` |
 | POST `/v1/attribute` | `{version,outputs:[{text,completion:"complete",expected_count},…]}`；必须恰好三个有效完整样本，返回 `prediction/results/used_outputs` |
+| POST `/v1/validate` | `{version,output:{text,completion,expected_count}}`；校验单份回答，返回 `{version,valid:boolean,reason?:string}` |
+
+单样本校验直接复用 `fingerprint.analyze_outputs` 的解析和有效样本判定：取最长数字序列，只计 1–355 范围内数字，有效数量至少为 `max(80,ceil(expected_count*0.55))`。不要求输出数量恰好等于挑战数量。完整但数字不足的回答返回 HTTP 200、`valid:false`、`reason:"insufficient_valid_numbers"`；完成状态不是 `complete` 时返回 HTTP 200、`valid:false`、`reason:"incomplete_output"`。有效回答返回 HTTP 200、`valid:true`，不返回模型归因结果。
+
+`output.text` 必须为不超过 100000 字符的字符串，`completion` 为非空字符串，`expected_count` 为 80–1000 的整数（不接受布尔值）。请求不是对象或 JSON 格式错误返回 400，样本参数错误返回 422，版本不符返回 409。认证、服务故障及版本冲突均不返回 `valid:false`，调用方不得将它们视为供应账户样本不合格。Portfolio 只补测无效样本；补测耗尽只能形成可用性异常，不能形成模型“不符”结论。
 
 版本包含算法标识、指纹库、算法源码和接口源码摘要；版本不匹配返回 409。无效模型或挑战参数为 400，拒答、截断、断流或有效样本不足为 422，不形成“不符”结论。归因仅给出该轮第一名，三轮多数、重试、预算、15 分钟调度和隔离由 Portfolio/Sub2API 管理。
 
