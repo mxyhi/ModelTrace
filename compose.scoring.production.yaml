@@ -1,0 +1,11 @@
+services:
+  modeltrace-scoring:
+    networks:
+      portfolio:
+        aliases:
+          - modeltrace-scoring
+
+networks:
+  portfolio:
+    external: true
+    name: ${PORTFOLIO_DOCKER_NETWORK:-1panel-network}

@@ -1,0 +1,11 @@
+FROM python:3.13-slim
+ARG VCS_REF=local
+LABEL org.opencontainers.image.revision=$VCS_REF
+WORKDIR /app
+COPY requirements-scoring.txt .
+RUN pip install --no-cache-dir -r requirements-scoring.txt
+COPY scoring_app.py fingerprint.py ./
+COPY data/unified_bank.json ./data/unified_bank.json
+USER 65532:65532
+EXPOSE 8080
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "2", "--timeout", "60", "scoring_app:create_app()"]
